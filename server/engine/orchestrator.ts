@@ -888,9 +888,10 @@ export class Orchestrator {
       summary: [
         `Alle ${tasks.length} Tasks sind umgesetzt und geprüft.`,
         '',
-        ...tasks.map((t) => `- ${t.key} ${t.title}: ${t.last_review?.summary ?? t.status}`),
+        ...tasks.map((t) => `- **${t.key} ${t.title}:** ${(t.last_review?.summary ?? t.status).replace(/^#+\s*/gm, '').replace(/\s*\n+\s*/g, ' ')}`),
         '',
-        `Workspace: ${path.relative(process.cwd(), this.memory.workspaceDir(oppId)) || this.memory.workspaceDir(oppId)}`,
+        `Workspace: \`${this.memory.workspaceDir(oppId)}\``,
+        '',
         'Mit der Freigabe wird das Projekt als veröffentlicht markiert. Das eigentliche Deployment führst du selbst durch.',
       ].join('\n'),
       opportunity_id: oppId,
