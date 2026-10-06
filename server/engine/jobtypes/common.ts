@@ -4,8 +4,15 @@ import { compactJson, type ContextSection } from '../prompt.ts';
 
 /** Gemeinsame Kontextbausteine für die Job-Typen (Konzept §11: nur relevante Artefakte laden). */
 
+/** Unternehmensstrategie – bevorzugt die Kurzfassung, gekürzt auf das eingestellte Limit. */
 export function strategySection(orch: Orchestrator, priority = 9): ContextSection {
-  return { title: 'Unternehmensstrategie (vom Owner gepflegt)', body: orch.memory.strategy() || '(noch keine Strategie hinterlegt)', priority, maxChars: 5000 };
+  const { source, text } = orch.memory.strategyForAgents();
+  return {
+    title: source === 'summary' ? 'Unternehmensstrategie (Kurzfassung, vom Owner gepflegt)' : 'Unternehmensstrategie (vom Owner gepflegt)',
+    body: text || '(noch keine Strategie hinterlegt)',
+    priority,
+    maxChars: orch.settings.strategy_context_chars,
+  };
 }
 
 export function knowledgeSection(orch: Orchestrator, priority = 3): ContextSection {

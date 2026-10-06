@@ -182,6 +182,7 @@ export const SettingsUpdate = z
     score_weight_technical: z.number().min(0).max(10),
     score_weight_risk: z.number().min(0).max(10),
     artifact_context_chars: z.number().int().min(500).max(100_000),
+    strategy_context_chars: z.number().int().min(1000).max(50_000),
     job_max_attempts: z.number().int().min(1).max(10),
   })
   .partial();

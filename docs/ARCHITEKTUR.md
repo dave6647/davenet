@@ -137,6 +137,13 @@ Gewichte und Schwellen unter *Einstellungen*.
   Berichte). Bausteine werden auf eine Maximalgröße gekürzt; reicht das Input-Limit des Agents
   nicht, fallen Bausteine niedriger Priorität zuerst weg (im Job-Protokoll vermerkt).
 - Übergaben zwischen Agents nur über kompakte Artefakte – nie über Chatverläufe.
+- Strategie: Agents erhalten `strategy/kurzfassung.md`, falls vorhanden (eine fast leere
+  Kurzfassung wird ignoriert), sonst `strategy/strategie.md` – jeweils gekürzt auf
+  `strategy_context_chars` (Standard 8.000 Zeichen ≈ 2.300 Tokens). `CompanyMemory.strategyStatus()`
+  liefert Quelle, Umfang, Kürzung und ob die Kurzfassung älter ist als die Langfassung
+  (Toleranz 2 Minuten); daraus entstehen die Hinweise in der Übersicht und im Gedächtnis.
+- Sprache: Berichte in der eingestellten Sprache, Inhalte für Kunden und Märkte (Listings,
+  Webseiten) in der Sprache des Zielmarkts.
 
 ## Sicherheit & Berechtigungen (Konzept §14)
 

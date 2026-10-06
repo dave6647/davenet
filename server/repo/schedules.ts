@@ -117,6 +117,7 @@ export const DEFAULT_SETTINGS: Settings = {
   score_weight_technical: 0.35,
   score_weight_risk: 0.2,
   artifact_context_chars: 6000,
+  strategy_context_chars: 8000,
   job_max_attempts: 3,
 };
 

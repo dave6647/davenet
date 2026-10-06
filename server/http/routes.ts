@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import type { FastifyInstance } from 'fastify';
-import { JOB_STATUSES, OPPORTUNITY_STATUSES, type JobStatus, type OpportunityStatus } from '../../shared/domain.ts';
+import { JOB_STATUSES, OPPORTUNITY_STATUSES, type JobStatus, type OpportunityStatus, type StrategyStatus } from '../../shared/domain.ts';
 import type { App } from '../app.ts';
 import { jobType, jobTypeInfos } from '../engine/jobtypes/index.ts';
 import { MEMORY_AREAS, OWNER_EDITABLE_AREAS } from '../engine/memory.ts';
@@ -25,6 +25,34 @@ const int = (v: string | undefined, def: number, max = 1000): number => {
   return Number.isFinite(n) && n >= 0 ? Math.min(max, Math.floor(n)) : def;
 };
 
+type OverviewAlert = { level: 'info' | 'warn' | 'error'; text: string; link?: string };
+
+/** Hinweise zur Unternehmensstrategie: Vorlage, Kürzung durch das Kontextlimit, veraltete Kurzfassung. */
+function strategyAlerts(s: StrategyStatus): OverviewAlert[] {
+  const link = (file: string) => `#/memory?file=${file}`;
+  const n = (v: number) => v.toLocaleString('de-DE');
+  if (s.source !== 'summary' && s.full.template) {
+    return [{ level: 'info', text: 'Die Unternehmensstrategie ist noch die Vorlage – bitte ausfüllen, damit Scout & Analyst passende Ergebnisse liefern', link: link(s.full.path) }];
+  }
+  const out: OverviewAlert[] = [];
+  if (s.summary.ignored) {
+    out.push({ level: 'warn', text: 'Die Strategie-Kurzfassung ist fast leer und wird ignoriert – die Agents erhalten die Langfassung', link: link(s.summary.path) });
+  }
+  if (s.truncated && s.source === 'summary') {
+    out.push({ level: 'warn', text: `Die Strategie-Kurzfassung ist länger als das Kontextlimit (${n(s.summary.chars)} von ${n(s.limit)} Zeichen) – die Agents sehen nur den Anfang`, link: link(s.summary.path) });
+  } else if (s.truncated) {
+    out.push({
+      level: 'warn',
+      text: `Die Strategie ist länger als das Kontextlimit (${n(s.full.chars)} von ${n(s.limit)} Zeichen) – die Agents sehen nur den Anfang. Lege eine Kurzfassung an oder erhöhe das Limit in den Einstellungen`,
+      link: link(s.full.path),
+    });
+  }
+  if (s.summary_outdated) {
+    out.push({ level: 'info', text: 'Die Strategie wurde nach der Kurzfassung geändert – die Agents arbeiten noch mit der alten Kurzfassung. Bitte prüfen und speichern', link: link(s.summary.path) });
+  }
+  return out;
+}
+
 export function registerRoutes(http: FastifyInstance, app: App, version: string): void {
   const { store, orch } = app;
 
@@ -44,7 +72,7 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
     const providers = orch.providerViews(now);
     const jobs = store.jobs.countByStatus();
     const budget = orch.systemBudget(now);
-    const alerts: { level: 'info' | 'warn' | 'error'; text: string; link?: string }[] = [];
+    const alerts: OverviewAlert[] = [];
     const pending = store.approvals.pendingCount();
     if (pending) alerts.push({ level: 'warn', text: `${pending} Freigabe(n) warten auf deine Entscheidung`, link: '#/approvals' });
     for (const p of providers.filter((x) => x.enabled)) {
@@ -56,9 +84,7 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
     if (jobs.BLOCKED) alerts.push({ level: 'error', text: `${jobs.BLOCKED} Job(s) blockiert – Eingreifen nötig`, link: '#/jobs?status=BLOCKED' });
     if (budget.exceeded) alerts.push({ level: 'error', text: `Systembudget ausgeschöpft ($${budget.spent.toFixed(2)} / $${budget.limit})`, link: '#/finance' });
     else if (budget.warning) alerts.push({ level: 'warn', text: `Budget-Schwelle erreicht (${budget.pct?.toFixed(0)} %) – nur noch Jobs mit hoher Priorität auf kostenpflichtigen Providern`, link: '#/finance' });
-    if (/Welche Art von Geschäft soll Davenet aufbauen\?/.test(app.memory.strategy())) {
-      alerts.push({ level: 'info', text: 'Die Unternehmensstrategie ist noch die Vorlage – bitte ausfüllen, damit Scout & Analyst passende Ergebnisse liefern', link: '#/memory?file=strategy/strategie.md' });
-    }
+    alerts.push(...strategyAlerts(app.memory.strategyStatus(orch.settings.strategy_context_chars)));
     if (orch.settings.engine_paused) alerts.push({ level: 'warn', text: 'Die Engine ist pausiert – es starten keine neuen Jobs' });
     return {
       company_name: orch.settings.company_name,
@@ -514,7 +540,12 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
 
   // ---------------------------------------------------------------- Unternehmensgedächtnis
 
-  http.get('/api/memory/tree', async () => ({ areas: MEMORY_AREAS, editable: OWNER_EDITABLE_AREAS, files: app.memory.tree() }));
+  http.get('/api/memory/tree', async () => ({
+    areas: MEMORY_AREAS,
+    editable: OWNER_EDITABLE_AREAS,
+    files: app.memory.tree(),
+    strategy: app.memory.strategyStatus(orch.settings.strategy_context_chars),
+  }));
   http.get('/api/memory/file', async (req) => {
     const p = String((req.query as Query).path ?? '');
     const file = app.memory.resolve(p);

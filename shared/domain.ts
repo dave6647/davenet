@@ -489,7 +489,22 @@ export interface Settings {
   score_weight_technical: number;
   score_weight_risk: number;
   artifact_context_chars: number;
+  strategy_context_chars: number;
   job_max_attempts: number;
+}
+
+/** Welche Fassung der Unternehmensstrategie die Agents als Kontext erhalten. */
+export interface StrategyStatus {
+  /** Mitgegebene Fassung: Kurzfassung, Langfassung oder keine. */
+  source: 'summary' | 'full' | 'none';
+  /** Zeichenlimit für den Strategie-Kontext (Einstellung strategy_context_chars). */
+  limit: number;
+  full: { path: string; exists: boolean; chars: number; modified: string | null; template: boolean };
+  summary: { path: string; exists: boolean; chars: number; modified: string | null; ignored: boolean };
+  /** Die Langfassung wurde nach der Kurzfassung geändert. */
+  summary_outdated: boolean;
+  /** Die mitgegebene Fassung ist länger als das Limit und wird gekürzt. */
+  truncated: boolean;
 }
 
 export interface JobTypeInfo {

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import type { StrategyStatus } from '../../../shared/domain.ts';
 import { api, qs } from '../api.ts';
 import { Badge, Card, ConfirmButton, ErrorBox, Field, Loading, Markdown, Modal, PageHead, TextArea, TextInput, useAction } from '../components/ui.tsx';
-import { fmtDateTime } from '../format.ts';
+import { fmtDateTime, fmtNum } from '../format.ts';
 import { useApi } from '../live.ts';
 import { setQuery, useRoute } from '../router.ts';
 
@@ -9,6 +10,7 @@ interface Tree {
   areas: string[];
   editable: string[];
   files: { path: string; size: number; modified: string }[];
+  strategy: StrategyStatus;
 }
 
 const AREA_LABELS: Record<string, string> = {
@@ -24,7 +26,7 @@ const AREA_LABELS: Record<string, string> = {
 
 export function Memory() {
   const route = useRoute();
-  const tree = useApi<Tree>('/api/memory/tree', ['memory', 'opportunity', 'job']);
+  const tree = useApi<Tree>('/api/memory/tree', ['memory', 'opportunity', 'job', 'settings']);
   const [filter, setFilter] = useState('');
   const [newFile, setNewFile] = useState(false);
   const selected = route.query.get('file');
@@ -67,10 +69,107 @@ export function Memory() {
             })}
           </div>
         </Card>
-        <div>{selected ? <FileView path={selected} editable={tree.data.editable.includes(selected.split('/')[0])} onDeleted={() => setQuery({ file: null })} /> : <Card><div className="empty">Datei auswählen. Tipp: Beginne mit <button className="link" onClick={() => setQuery({ file: 'strategy/strategie.md' })}>strategy/strategie.md</button> – die Strategie steuert, was Scout und Analyst suchen.</div></Card>}</div>
+        <div className="grid" style={{ alignContent: 'start' }}>
+          {(!selected || selected.startsWith('strategy/')) && <StrategyInfo s={tree.data.strategy} />}
+          {selected ? (
+            <FileView path={selected} editable={tree.data.editable.includes(selected.split('/')[0])} onDeleted={() => setQuery({ file: null })} />
+          ) : (
+            <Card>
+              <div className="empty">
+                Datei auswählen. Tipp: Beginne mit{' '}
+                <button className="link" onClick={() => setQuery({ file: 'strategy/strategie.md' })}>
+                  strategy/strategie.md
+                </button>{' '}
+                – die Strategie steuert, was Scout und Analyst suchen.
+              </div>
+            </Card>
+          )}
+        </div>
       </div>
       {newFile && <NewFileDialog onClose={() => setNewFile(false)} />}
     </>
+  );
+}
+
+/** Zeigt, welche Fassung der Strategie die Agents erhalten (Kurzfassung bevorzugt) und ob sie gekürzt wird. */
+function StrategyInfo({ s }: { s: StrategyStatus }) {
+  const { run, busy } = useAction();
+  const used = s.source === 'summary' ? s.summary : s.full;
+  const sent = Math.min(used.chars, s.limit);
+  const createSummary = () =>
+    run(async () => {
+      const full = await api.get<{ content: string }>(`/api/memory/file${qs({ path: s.full.path })}`);
+      const body = full.content.replace(/^# .*\n+/, '');
+      const content = [
+        '# Unternehmensstrategie – Kurzfassung',
+        '',
+        '> Diese Fassung erhalten die Agents anstelle von strategie.md. Auf die Regeln, Zahlen und Kriterien kürzen, die für Entscheidungen zählen.',
+        '',
+        body,
+      ].join('\n');
+      await api.put('/api/memory/file', { path: s.summary.path, content });
+      setQuery({ file: s.summary.path });
+    }, 'Kurzfassung als Kopie der Langfassung angelegt – jetzt kürzen');
+  const fileLine = (f: { path: string; exists: boolean; chars: number; modified: string | null }) =>
+    f.exists ? (
+      <>
+        <button className="link mono" onClick={() => setQuery({ file: f.path })}>
+          {f.path}
+        </button>{' '}
+        <span className="muted">
+          · {fmtNum(f.chars)} Zeichen · geändert {fmtDateTime(f.modified)}
+        </span>
+      </>
+    ) : (
+      <span className="muted">nicht angelegt</span>
+    );
+  return (
+    <Card
+      title="Strategie im Agent-Kontext"
+      actions={
+        <a className="small" href="#/settings">
+          Limit ändern
+        </a>
+      }
+    >
+      <dl className="kv">
+        <dt>Agents erhalten</dt>
+        <dd>
+          <strong>{s.source === 'summary' ? 'Kurzfassung' : s.source === 'full' ? 'Langfassung' : 'keine Strategie'}</strong>{' '}
+          {s.source !== 'none' &&
+            (s.truncated ? <Badge kind="warn">gekürzt</Badge> : <Badge kind="ok">vollständig</Badge>)}
+        </dd>
+        <dt>Umfang</dt>
+        <dd>
+          {fmtNum(sent)} von max. {fmtNum(s.limit)} Zeichen (≈ {fmtNum(Math.ceil(sent / 3.5))} Tokens pro Job)
+        </dd>
+        <dt>Langfassung</dt>
+        <dd>{fileLine(s.full)}</dd>
+        <dt>Kurzfassung</dt>
+        <dd>
+          {fileLine(s.summary)}
+          {!s.summary.exists && s.full.exists && !s.full.template && (
+            <>
+              {' '}
+              <button className="small" disabled={busy} onClick={createSummary}>
+                Kurzfassung anlegen
+              </button>
+            </>
+          )}
+        </dd>
+      </dl>
+      {s.summary.ignored && <div className="alert warn" style={{ marginTop: 10 }}>Die Kurzfassung ist fast leer und wird ignoriert – die Agents erhalten die Langfassung.</div>}
+      {s.summary_outdated && (
+        <div className="alert info" style={{ marginTop: 10 }}>Die Langfassung wurde nach der Kurzfassung geändert. Bitte die Kurzfassung prüfen, anpassen und speichern.</div>
+      )}
+      {s.truncated && (
+        <div className="alert warn" style={{ marginTop: 10 }}>
+          {s.source === 'summary'
+            ? `Die Kurzfassung ist länger als das Limit – die Agents sehen nur die ersten ${fmtNum(s.limit)} Zeichen.`
+            : `Die Langfassung ist länger als das Limit – die Agents sehen nur die ersten ${fmtNum(s.limit)} Zeichen. Lege eine Kurzfassung an oder erhöhe das Limit.`}
+        </div>
+      )}
+    </Card>
   );
 }
 

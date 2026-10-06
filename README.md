@@ -45,7 +45,8 @@ Freigaben, Unternehmensdaten, Audit) in eigenen Komponenten hält.
   Opportunity und Tag.
 - **Unternehmensgedächtnis** als Dateien (`/strategy`, `/opportunities`, `/projects`, `/research`,
   `/finance`, `/decisions`, `/knowledge`, `/audit`); Agents bekommen nur gekürzte, relevante
-  Ausschnitte. Die Strategie-Datei steuert, wonach gesucht wird.
+  Ausschnitte. Die Strategie steuert, wonach gesucht wird – bei langen Strategien erhalten die
+  Agents eine Kurzfassung.
 - **Freigaben & Audit-Log** mit Approval-Levels 0–3, **Zeit- und Ereignis-Trigger**.
 
 ## Schnellstart
@@ -75,6 +76,10 @@ npm run dev        # Oberfläche auf http://localhost:5173, API auf :4310
 
 1. **Strategie festlegen:** *Gedächtnis → strategy/strategie.md* ausfüllen (Ausrichtung,
    Suchfelder, Ausschlusskriterien, Ressourcen). Das ist der wichtigste Hebel für gute Ergebnisse.
+   Ist die Strategie länger als das Kontextlimit (*Einstellungen*, Standard 8.000 Zeichen), lege
+   zusätzlich eine Kurzfassung `strategy/kurzfassung.md` an (Button *Kurzfassung anlegen* im
+   Gedächtnis) – die Agents erhalten dann diese. Die Übersicht meldet, wenn die Strategie gekürzt
+   wird oder die Kurzfassung älter ist als die Langfassung.
 2. **Provider prüfen:** *Provider & Modelle → Claude-Abo → Verbindung testen.* Ohne Claude Code
    alternativ den API-Provider aktivieren und einen Key hinterlegen.
 3. **Arbeit anstoßen:** *Research-Zyklus starten*, eine eigene *Idee erfassen* oder oben rechts

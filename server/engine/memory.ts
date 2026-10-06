@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Artifact } from '../../shared/domain.ts';
+import type { Artifact, StrategyStatus } from '../../shared/domain.ts';
 import type { Store } from '../repo/store.ts';
 import { ValidationError } from '../repo/util.ts';
 
@@ -11,12 +11,30 @@ export type MemoryArea = (typeof MEMORY_AREAS)[number];
 /** Bereiche, die der Owner in der Oberfläche direkt bearbeiten darf. */
 export const OWNER_EDITABLE_AREAS: MemoryArea[] = ['strategy', 'knowledge', 'decisions'];
 
-const STRATEGY_FILE = 'strategy/strategie.md';
+export const STRATEGY_FILE = 'strategy/strategie.md';
+/** Optionale Kurzfassung der Strategie – die Agents erhalten sie anstelle der Langfassung. */
+export const STRATEGY_SUMMARY_FILE = 'strategy/kurzfassung.md';
+const TEMPLATE_MARKER = 'Welche Art von Geschäft soll Davenet aufbauen?';
+/** Eine Kurzfassung mit weniger Inhalt gilt als leer, damit die Agents nicht versehentlich ohne Strategie arbeiten. */
+const MIN_SUMMARY_CHARS = 200;
+/** Toleranz beim Vergleich der Änderungszeiten, damit gemeinsam kopierte Dateien nicht als veraltet gelten. */
+const OUTDATED_TOLERANCE_MS = 2 * 60_000;
+
+/** Zeichen ohne Überschriften, Zitate, Kommentare und Leerraum – zeigt, ob eine Datei tatsächlich Inhalt hat. */
+const substance = (md: string): number =>
+  md
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .split('\n')
+    .filter((line) => !/^\s*[#>]/.test(line))
+    .join('')
+    .replace(/\s+/g, '').length;
 
 const STRATEGY_TEMPLATE = `# Unternehmensstrategie
 
-> Diese Datei wird den Agents (gekürzt) als Kontext mitgegeben. Je konkreter sie ist,
-> desto passender werden Opportunities, Bewertungen und Pläne. Bitte an deine Ziele anpassen.
+> Die Agents erhalten diese Datei als Kontext (gekürzt auf das Limit aus den Einstellungen). Je konkreter
+> sie ist, desto passender werden Opportunities, Bewertungen und Pläne. Bitte an deine Ziele anpassen.
+> Bei einer langen Strategie zusätzlich eine Kurzfassung als strategy/kurzfassung.md anlegen –
+> dann erhalten die Agents diese.
 
 ## Ausrichtung
 - Welche Art von Geschäft soll Davenet aufbauen? (z. B. kleine, profitable Software-Produkte / SaaS)
@@ -84,12 +102,60 @@ export class CompanyMemory {
     fs.rmSync(this.resolve(rel), { force: true });
   }
 
-  strategy(): string {
+  private readOptional(rel: string): string {
     try {
-      return this.readFile(STRATEGY_FILE);
+      return this.readFile(rel);
     } catch {
       return '';
     }
+  }
+
+  /** Langfassung der Strategie (vom Owner gepflegt). */
+  strategy(): string {
+    return this.readOptional(STRATEGY_FILE);
+  }
+
+  /** Strategie für den Agent-Kontext: bevorzugt die Kurzfassung, sonst die Langfassung. */
+  strategyForAgents(): { source: StrategyStatus['source']; text: string } {
+    const summary = this.readOptional(STRATEGY_SUMMARY_FILE).trim();
+    if (substance(summary) >= MIN_SUMMARY_CHARS) return { source: 'summary', text: summary };
+    const full = this.strategy().trim();
+    return full ? { source: 'full', text: full } : { source: 'none', text: '' };
+  }
+
+  strategyStatus(limit: number): StrategyStatus {
+    const stat = (rel: string) => {
+      try {
+        const st = fs.statSync(this.resolve(rel));
+        return st.isFile() ? st : null;
+      } catch {
+        return null;
+      }
+    };
+    const fullStat = stat(STRATEGY_FILE);
+    const summaryStat = stat(STRATEGY_SUMMARY_FILE);
+    const fullText = this.strategy().trim();
+    const current = this.strategyForAgents();
+    return {
+      source: current.source,
+      limit,
+      full: {
+        path: STRATEGY_FILE,
+        exists: !!fullStat,
+        chars: fullText.length,
+        modified: fullStat?.mtime.toISOString() ?? null,
+        template: fullText.includes(TEMPLATE_MARKER),
+      },
+      summary: {
+        path: STRATEGY_SUMMARY_FILE,
+        exists: !!summaryStat,
+        chars: this.readOptional(STRATEGY_SUMMARY_FILE).trim().length,
+        modified: summaryStat?.mtime.toISOString() ?? null,
+        ignored: !!summaryStat && current.source !== 'summary',
+      },
+      summary_outdated: current.source === 'summary' && !!fullStat && !!summaryStat && fullStat.mtimeMs - summaryStat.mtimeMs > OUTDATED_TOLERANCE_MS,
+      truncated: current.text.length > limit,
+    };
   }
 
   /** Kurzfassung des Wissensbereichs (Dateinamen + Anfang) für Prompts. */

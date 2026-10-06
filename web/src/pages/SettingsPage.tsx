@@ -45,7 +45,7 @@ export function SettingsPage() {
             <Field label="Unternehmensname">
               <TextInput value={s.company_name} onChange={(v) => set('company_name', v)} />
             </Field>
-            <Field label="Sprache der Ergebnisse">
+            <Field label="Sprache der Berichte" help="Produktinhalte wie Listings und Webseiten schreiben die Agents in der Sprache des Zielmarkts">
               <TextInput value={s.output_language} onChange={(v) => set('output_language', v)} />
             </Field>
           </div>
@@ -115,9 +115,22 @@ export function SettingsPage() {
           </div>
         </Card>
         <Card title="Kontext-Strategie (Konzept §11)">
-          <Field label="Max. Zeichen pro eingebettetem Artefakt" help="Reports werden beim Einbetten in Folge-Prompts auf diese Größe gekürzt.">
-            <NumberInput value={s.artifact_context_chars} onChange={(v) => set('artifact_context_chars', v ?? 6000)} step={500} />
-          </Field>
+          <div className="form-grid">
+            <Field
+              label="Max. Zeichen der Unternehmensstrategie"
+              help={
+                <>
+                  Agents erhalten die Kurzfassung (<span className="mono">strategy/kurzfassung.md</span>), sonst die Langfassung – gekürzt auf diese Länge. Rund 3,5 Zeichen
+                  entsprechen einem Token.
+                </>
+              }
+            >
+              <NumberInput value={s.strategy_context_chars} onChange={(v) => set('strategy_context_chars', v ?? 8000)} step={500} min={1000} />
+            </Field>
+            <Field label="Max. Zeichen pro eingebettetem Artefakt" help="Reports werden beim Einbetten in Folge-Prompts auf diese Größe gekürzt.">
+              <NumberInput value={s.artifact_context_chars} onChange={(v) => set('artifact_context_chars', v ?? 6000)} step={500} />
+            </Field>
+          </div>
         </Card>
         <Card title="System">
           <dl className="kv">
