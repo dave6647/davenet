@@ -297,7 +297,7 @@ function Overview({ d }: { d: Detail }) {
             {fields.map(([k, l]) => (
               <div key={k} style={{ display: 'contents' }}>
                 <dt>{l}</dt>
-                <dd style={{ whiteSpace: 'pre-wrap' }}>{String(o[k] ?? '') || <span className="muted">–</span>}</dd>
+                <dd>{String(o[k] ?? '').trim() ? <Markdown text={String(o[k])} /> : <span className="muted">–</span>}</dd>
               </div>
             ))}
           </dl>

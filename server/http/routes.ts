@@ -346,7 +346,11 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
     store.opportunities.require(id);
     const q = req.query as Query;
     const ws = new Workspace(app.memory.workspaceDir(id), false);
-    return { path: q.path, content: ws.read(String(q.path ?? '')) };
+    try {
+      return { path: q.path, content: ws.read(String(q.path ?? '')) };
+    } catch (e) {
+      throw new NotFoundError(`Datei ${q.path ?? ''} (${e instanceof Error ? e.message : String(e)})`);
+    }
   });
   http.post('/api/opportunities', async (req) => {
     const { screen, ...body } = S.OpportunityCreate.parse(req.body);

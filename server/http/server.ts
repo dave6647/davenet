@@ -109,6 +109,8 @@ export async function buildHttp(app: App, opts: HttpOptions = {}): Promise<Fasti
 
   http.setNotFoundHandler((req, reply) => {
     if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'Unbekannter Endpunkt' });
+    // Fehlende Dateien (z. B. veraltete Asset-Namen) nicht mit index.html beantworten
+    if (/\.[a-z0-9]{1,8}(\?.*)?$/i.test(req.url)) return reply.code(404).type('text/plain; charset=utf-8').send('Nicht gefunden');
     if (opts.webDir && fs.existsSync(path.join(opts.webDir, 'index.html'))) return reply.sendFile('index.html');
     return reply
       .code(200)
@@ -121,7 +123,8 @@ export async function buildHttp(app: App, opts: HttpOptions = {}): Promise<Fasti
   });
 
   if (opts.webDir && fs.existsSync(opts.webDir)) {
-    await http.register(fastifyStatic, { root: path.resolve(opts.webDir), prefix: '/', wildcard: false, index: ['index.html'] });
+    // Dateien werden bei jedem Aufruf aufgelöst – ein neuer Build der Oberfläche wirkt ohne Server-Neustart
+    await http.register(fastifyStatic, { root: path.resolve(opts.webDir), prefix: '/', index: ['index.html'] });
   }
   return http;
 }

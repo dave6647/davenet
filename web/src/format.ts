@@ -14,8 +14,12 @@ export function fmtRelative(iso: string | null | undefined): string {
   return diff > 0 ? `in ${label}` : `vor ${label}`;
 }
 
-export const fmtUsd = (v: number | null | undefined, digits = 2): string =>
-  v == null ? '–' : `$${v.toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: Math.max(digits, 4) })}`;
+/** USD-Betrag; sehr kleine Beträge (< 1 Cent) mit 4 Nachkommastellen, damit sie nicht als 0 erscheinen. */
+export function fmtUsd(v: number | null | undefined, digits = 2): string {
+  if (v == null) return '–';
+  const d = v !== 0 && Math.abs(v) < 0.01 ? Math.max(digits, 4) : digits;
+  return `$${v.toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d })}`;
+}
 
 export const fmtNum = (v: number | null | undefined): string => (v == null ? '–' : Math.round(v).toLocaleString('de-DE'));
 

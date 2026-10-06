@@ -73,14 +73,12 @@ export function resolveClaudeCommand(cliPath: string): CliCommand | null {
     if (isFile(native)) bin = native;
   }
   if (!bin) return null;
-  if (process.platform !== 'win32') {
-    try {
-      const real = fs.realpathSync(bin);
-      // npm-Installation: Link auf ein JS-Skript -> mit dem eigenen Node starten (unabhängig von PATH/Shebang)
-      if (/\.(c|m)?js$/i.test(real)) return { file: process.execPath, pre: [real] };
-    } catch {
-      /* ignorieren */
-    }
+  try {
+    const real = fs.realpathSync(bin);
+    // npm-Installation (Link auf ein JS-Skript) oder direkt angegebenes Skript -> mit dem eigenen Node starten
+    if (/\.(c|m)?js$/i.test(real)) return { file: process.execPath, pre: [real] };
+  } catch {
+    /* ignorieren */
   }
   if (/\.(cmd|bat)$/i.test(bin)) {
     // Windows + npm: .cmd-Wrapper lassen sich ohne Shell nicht starten -> zugehöriges cli.js direkt mit Node ausführen
@@ -437,13 +435,25 @@ export class ClaudeCliAdapter implements ProviderAdapter {
   }
 
   private usageFrom(out: CliRunOutcome): CallUsage {
-    const u = out.result?.usage ?? {};
     const usage = emptyUsage();
-    usage.inputTokens = Number(u.input_tokens) || 0;
-    usage.outputTokens = Number(u.output_tokens) || 0;
-    usage.cacheReadTokens = Number(u.cache_read_input_tokens) || 0;
-    usage.cacheWriteTokens = Number(u.cache_creation_input_tokens) || 0;
-    usage.webSearches = Number(u.server_tool_use?.web_search_requests) || 0;
+    // `modelUsage` ist über alle Teilschritte (Tool-Runden) kumuliert – `usage` enthält nur den letzten Schritt.
+    const perModel = Object.values((out.result?.modelUsage ?? {}) as Record<string, Record<string, unknown>>);
+    if (perModel.length) {
+      for (const m of perModel) {
+        usage.inputTokens += Number(m.inputTokens) || 0;
+        usage.outputTokens += Number(m.outputTokens) || 0;
+        usage.cacheReadTokens += Number(m.cacheReadInputTokens) || 0;
+        usage.cacheWriteTokens += Number(m.cacheCreationInputTokens) || 0;
+        usage.webSearches += Number(m.webSearchRequests) || 0;
+      }
+    } else {
+      const u = out.result?.usage ?? {};
+      usage.inputTokens = Number(u.input_tokens) || 0;
+      usage.outputTokens = Number(u.output_tokens) || 0;
+      usage.cacheReadTokens = Number(u.cache_read_input_tokens) || 0;
+      usage.cacheWriteTokens = Number(u.cache_creation_input_tokens) || 0;
+      usage.webSearches = Number(u.server_tool_use?.web_search_requests) || 0;
+    }
     usage.requests = Math.max(1, Number(out.result?.num_turns) || 1);
     usage.toolCalls = out.toolCalls;
     const cost = Number(out.result?.total_cost_usd);
@@ -472,12 +482,20 @@ export class ClaudeCliAdapter implements ProviderAdapter {
     });
   }
 
+  /** Tatsächlich genutztes Modell: das angefragte, falls es Nutzung hatte, sonst das mit dem meisten Output. */
+  private servedModel(result: Record<string, any> | null, requested: string): string {
+    const mu = (result?.modelUsage ?? {}) as Record<string, Record<string, unknown>>;
+    const names = Object.keys(mu);
+    if (!names.length || names.includes(requested)) return requested;
+    return names.sort((a, b) => (Number(mu[b].outputTokens) || 0) - (Number(mu[a].outputTokens) || 0))[0];
+  }
+
   private interpret(out: CliRunOutcome, req: ModelCallRequest): ModelCallResult {
     if (out.killedFor === 'cancelled') throw new ProviderError('cancelled', 'Abgebrochen');
     if (out.killedFor === 'timeout') throw new ProviderError('timeout', `Zeitlimit (${Math.round(req.timeoutMs / 1000)} s) überschritten`);
     if (out.killedFor === 'tool_limit') throw new ProviderError('limit', `Tool-Call-Limit (${req.maxToolCalls}) überschritten`);
     const r = out.result;
-    const model = r?.modelUsage ? Object.keys(r.modelUsage)[0] ?? req.model : req.model;
+    const model = this.servedModel(r, req.model);
     if (r) req.onUsage(this.usageFrom(out), model);
 
     if (!r) {

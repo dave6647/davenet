@@ -221,6 +221,7 @@ legend { font-weight: 600; padding: 0 6px; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
+.kv dd .md p:last-child, .kv dd .md ul:last-child { margin-bottom: 0; }
 .list-plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .scroll-y { max-height: 420px; overflow-y: auto; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

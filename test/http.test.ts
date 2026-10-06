@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { buildHttp } from '../server/http/server.ts';
 import { testApp } from './helpers.ts';
@@ -130,5 +133,34 @@ test('HTTP: Unternehmensgedächtnis – nur freigegebene Bereiche schreibbar, ke
   } finally {
     await http.close();
     await app.close();
+  }
+});
+
+test('HTTP: Oberfläche – SPA-Fallback, neue Build-Dateien ohne Neustart, 404 für fehlende Assets', async () => {
+  const app = testApp();
+  const web = fs.mkdtempSync(path.join(os.tmpdir(), 'davenet-web-'));
+  fs.writeFileSync(path.join(web, 'index.html'), '<!doctype html><title>Davenet</title>');
+  const http = await buildHttp(app, { webDir: web });
+  try {
+    const index = await http.inject({ method: 'GET', url: '/', headers: { host: 'localhost' } });
+    assert.equal(index.statusCode, 200);
+    assert.match(index.body, /Davenet/);
+    // Datei erst nach dem Start anlegen (wie ein neuer Build)
+    fs.mkdirSync(path.join(web, 'assets'));
+    fs.writeFileSync(path.join(web, 'assets', 'app-123.js'), 'console.log(1)');
+    const asset = await http.inject({ method: 'GET', url: '/assets/app-123.js', headers: { host: 'localhost' } });
+    assert.equal(asset.statusCode, 200);
+    assert.match(String(asset.headers['content-type']), /javascript/);
+    const missing = await http.inject({ method: 'GET', url: '/assets/alt-999.js', headers: { host: 'localhost' } });
+    assert.equal(missing.statusCode, 404);
+    const deep = await http.inject({ method: 'GET', url: '/irgendeine/seite', headers: { host: 'localhost' } });
+    assert.equal(deep.statusCode, 200, 'SPA-Fallback auf index.html');
+    const api = await http.inject({ method: 'GET', url: '/api/gibtsnicht', headers: { host: 'localhost' } });
+    assert.equal(api.statusCode, 404);
+    assert.match(api.body, /Unbekannter Endpunkt/);
+  } finally {
+    await http.close();
+    await app.close();
+    fs.rmSync(web, { recursive: true, force: true });
   }
 });

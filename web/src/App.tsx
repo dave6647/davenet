@@ -130,7 +130,7 @@ function Shell() {
             Auftrag erteilen
           </button>
           <button onClick={toggleEngine} disabled={busy || !engine.data}>
-            {engine.data?.paused ? '▶ Engine fortsetzen' : '⏸ Engine pausieren'}
+            {engine.data?.paused ? 'Engine fortsetzen' : 'Engine pausieren'}
           </button>
         </header>
         <main className="content">{page}</main>
