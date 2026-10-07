@@ -1,6 +1,7 @@
 import type { Store } from '../repo/store.ts';
-import type { Agent, Capability, Model, Provider } from '../../shared/domain.ts';
+import type { Agent, Capability, Model, Provider, Settings } from '../../shared/domain.ts';
 import { computeNextRun } from '../engine/triggers.ts';
+import { DEFAULT_SETTINGS } from '../repo/schedules.ts';
 
 /**
  * Startkonfiguration nach Konzept §2 (Organisationsmodell) – zunächst ausschließlich mit Claude-Modellen.
@@ -427,6 +428,29 @@ export function ensureSeedV2(store: Store): void {
   });
 }
 
+/** Standard-Schwellen der ersten Version – sie passten zur alten Skala aus Markt-, Technik- und Risiko-Score. */
+const V1_THRESHOLDS = { deep_research_threshold: 60, proposal_threshold: 65 } as const;
+
+/**
+ * Stellt Schwellen, die noch auf dem alten Standardwert stehen, einmalig auf die Standardwerte der
+ * 13-Kriterien-Skala um. Werte, die der Owner selbst geändert hat, bleiben unberührt.
+ */
+export function ensureThresholdsV2(store: Store): void {
+  if (store.db.get("SELECT value FROM meta WHERE key = 'thresholds_v2'")) return;
+  store.tx(() => {
+    const current = store.settings.get();
+    const patch: Partial<Settings> = {};
+    for (const [key, old] of Object.entries(V1_THRESHOLDS) as [keyof typeof V1_THRESHOLDS, number][]) {
+      if (current[key] === old && DEFAULT_SETTINGS[key] !== old) patch[key] = DEFAULT_SETTINGS[key];
+    }
+    if (Object.keys(patch).length) {
+      store.settings.update(patch);
+      store.audit.add({ actor: 'system', action: 'settings.thresholds_rescaled', details: patch });
+    }
+    store.db.run("INSERT INTO meta (key, value) VALUES ('thresholds_v2', ?)", new Date().toISOString());
+  });
+}
+
 const SCHEDULES = [
   { name: 'Research-Zyklus (wöchentlich)', job_type: 'opportunity_scan', input: { count: 5 }, kind: 'weekly', weekday: 1, time_of_day: '08:00' },
   { name: 'Executive Briefing (wöchentlich)', job_type: 'executive_briefing', input: {}, kind: 'weekly', weekday: 1, time_of_day: '07:30' },
@@ -438,6 +462,7 @@ export function seedDefaults(store: Store): boolean {
   const seeded = store.db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'seeded'");
   if (seeded) {
     ensureSeedV2(store);
+    ensureThresholdsV2(store);
     ensureRoutes(store);
     return false;
   }
@@ -463,6 +488,7 @@ export function seedDefaults(store: Store): boolean {
       });
     }
     ensureSeedV2(store);
+    ensureThresholdsV2(store);
     ensureRoutes(store);
     store.db.run("INSERT INTO meta (key, value) VALUES ('seeded', ?)", new Date().toISOString());
     store.audit.add({ actor: 'system', action: 'system.seeded', details: { departments: DEPARTMENTS.length, agents: AGENTS.length } });

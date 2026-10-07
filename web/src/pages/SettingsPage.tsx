@@ -82,10 +82,10 @@ export function SettingsPage() {
               <Check checked={s.auto_start_development} onChange={(v) => set('auto_start_development', v)} label="nach der Planung automatisch starten" />
             </Field>
             <Field label="Schwelle Deep Research (Score 0–100)">
-              <NumberInput value={s.deep_research_threshold} onChange={(v) => set('deep_research_threshold', v ?? 60)} />
+              <NumberInput value={s.deep_research_threshold} onChange={(v) => set('deep_research_threshold', v ?? 50)} />
             </Field>
             <Field label="Schwelle Vorschlag an Owner (Score)">
-              <NumberInput value={s.proposal_threshold} onChange={(v) => set('proposal_threshold', v ?? 65)} />
+              <NumberInput value={s.proposal_threshold} onChange={(v) => set('proposal_threshold', v ?? 60)} />
             </Field>
             <Field label="Kandidaten pro Scan (Standard)">
               <NumberInput value={s.scan_default_count} onChange={(v) => set('scan_default_count', v ?? 5)} min={1} />

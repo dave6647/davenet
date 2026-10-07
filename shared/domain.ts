@@ -198,7 +198,7 @@ export interface TestPlan {
 export const TEST_STATUSES = ['PROPOSED', 'PREPARING', 'READY', 'RUNNING', 'EVALUATING', 'PASSED', 'FAILED'] as const;
 export type TestStatus = (typeof TEST_STATUSES)[number];
 export const TEST_STATUS_LABELS: Record<TestStatus, string> = {
-  PROPOSED: 'vorgeschlagen',
+  PROPOSED: 'Plan liegt vor',
   PREPARING: 'wird vorbereitet',
   READY: 'Testpaket bereit – deine Schritte',
   RUNNING: 'läuft',

@@ -142,14 +142,14 @@ function EventTriggers({ settings, reload }: { settings: Settings; reload: () =>
             <td>Opportunity-Score ≥ Schwelle (Screening)</td>
             <td>Deep Research</td>
             <td style={{ width: 160 }}>
-              <NumberInput value={s.deep_research_threshold} onChange={(v) => setS({ ...s, deep_research_threshold: v ?? 60 })} />
+              <NumberInput value={s.deep_research_threshold} onChange={(v) => setS({ ...s, deep_research_threshold: v ?? 50 })} />
             </td>
           </tr>
           <tr>
             <td>Bewertung GO und Score ≥ Schwelle</td>
             <td>Owner-Freigabe Projektstart anfordern</td>
             <td>
-              <NumberInput value={s.proposal_threshold} onChange={(v) => setS({ ...s, proposal_threshold: v ?? 65 })} />
+              <NumberInput value={s.proposal_threshold} onChange={(v) => setS({ ...s, proposal_threshold: v ?? 60 })} />
             </td>
           </tr>
           <tr>

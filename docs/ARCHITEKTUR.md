@@ -136,8 +136,10 @@ Nachvollziehbarkeit gespeichert.
 skaliert auf 0–100 – multiplikativ, damit ein sehr schwacher Wert nicht durch gute Werte
 ausgeglichen wird. **K.-o.-Kriterien** (Nachfrage unter der Schwelle, Rechtsprüfung rot, Testplan
 außerhalb der Leitplanken) deckeln den Score auf 30 und damit unter die Schwellen für Recherche
-und Vorschlag. Gewichte, Schwellen und Leitplanken unter *Einstellungen*; ältere Opportunities
-behalten ihr Schema (Markt/Technik/Risiko).
+und Vorschlag. Standard-Schwellen: 50 für die Tiefenrecherche (vorläufige Screening-Werte sind
+vorsichtig) und 60 für den Vorschlag an den Owner; Installationen, die noch auf den alten
+Standardwerten (60/65) standen, werden beim Update einmalig umgestellt. Gewichte, Schwellen und
+Leitplanken unter *Einstellungen*; ältere Opportunities behalten ihr Schema (Markt/Technik/Risiko).
 
 **Nachfragetest & Leitplanken:** Der Testplan (Hypothese, Kanal, Budget, Owner-Zeit, Laufzeit,
 Messgröße, Erfolgskriterium) entsteht bei der Bewertung. Test- und Projektfreigaben sind nur

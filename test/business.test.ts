@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { DEFAULT_CRITERIA_WEIGHTS, KO_SCORE_CAP, type TestPlan } from '../shared/domain.ts';
 import { DEFAULT_SETTINGS } from '../server/repo/schedules.ts';
 import { cappedScore, criteriaScore, guardrailIssues, knockouts } from '../server/engine/scoring.ts';
-import { ensureSeedV2 } from '../server/db/seed.ts';
+import { ensureSeedV2, ensureThresholdsV2 } from '../server/db/seed.ts';
 import { buildHttp } from '../server/http/server.ts';
 import { testApp } from './helpers.ts';
 
@@ -245,6 +245,44 @@ test('Update bestehender Installationen: Designer, Bild-Provider und Review-Zeit
     app.store.schedules.list().filter((s) => s.job_type === 'portfolio_review').forEach((s) => app.store.db.run('DELETE FROM schedules WHERE id = ?', s.id));
     ensureSeedV2(app.store);
     assert.equal(app.store.schedules.list().filter((s) => s.job_type === 'portfolio_review').length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Screening: PASS mit vorläufig mittleren Werten geht in die Tiefenrecherche; alte Standardschwelle wird einmalig umgestellt', async () => {
+  const app = testApp();
+  try {
+    assert.equal(app.store.settings.get().deep_research_threshold, 50);
+    assert.equal(app.store.settings.get().proposal_threshold, 60);
+    // Werte eines echten Screening-Laufs (FiveM-Script-Idee): PASS, rechtlich "prüfen", Score 56
+    const real = { demand: 6, test_cost: 6, time_to_revenue: 5, automation: 7, ongoing_effort: 6, margin: 9, feasibility: 6, competition: 4, scalability: 7, platform_risk: 4, support: 5, repeatability: 6, legal: 3 };
+    const opp = app.orch.createOpportunity({ title: 'FiveM-Tuning-Shop' });
+    app.store.opportunities.update(opp.id, { status: 'SCREENING' });
+    const job = app.orch.createJob({ type: 'screening', input: { opportunity_ids: [opp.id] }, created_by: 'owner' })!;
+    app.orch.applyScreening(app.orch.jobContext(job), {
+      results: [{ id: opp.id, decision: 'PASS', criteria: real, legal_flag: 'check', legal_note: 'EULA und Plattformregeln prüfen', reason: 'lohnt eine Recherche' }],
+    });
+    const o = app.store.opportunities.require(opp.id);
+    assert.equal(o.score, 56);
+    assert.equal(o.status, 'RESEARCH', 'die Detailrecherche klärt die offenen Punkte');
+    assert.equal(o.legal?.status, 'yellow');
+
+    // Installation, deren Einstellungen noch auf dem alten Standardwert stehen
+    app.store.db.run("DELETE FROM meta WHERE key = 'thresholds_v2'");
+    app.store.settings.update({ deep_research_threshold: 60, proposal_threshold: 65 });
+    ensureThresholdsV2(app.store);
+    assert.equal(app.store.settings.get().deep_research_threshold, 50);
+    assert.equal(app.store.settings.get().proposal_threshold, 60);
+    // danach gesetzte Werte des Owners bleiben – auch 60
+    app.store.settings.update({ deep_research_threshold: 60 });
+    ensureThresholdsV2(app.store);
+    assert.equal(app.store.settings.get().deep_research_threshold, 60);
+    // eigene Werte vor dem Update bleiben ebenfalls
+    app.store.db.run("DELETE FROM meta WHERE key = 'thresholds_v2'");
+    app.store.settings.update({ deep_research_threshold: 55 });
+    ensureThresholdsV2(app.store);
+    assert.equal(app.store.settings.get().deep_research_threshold, 55);
   } finally {
     await app.close();
   }
