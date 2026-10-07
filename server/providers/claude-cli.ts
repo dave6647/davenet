@@ -42,7 +42,7 @@ interface CliCommand {
   pre: string[];
 }
 
-function isFile(p: string): boolean {
+export function isFile(p: string): boolean {
   try {
     return fs.statSync(p).isFile();
   } catch {
@@ -50,7 +50,7 @@ function isFile(p: string): boolean {
   }
 }
 
-function which(name: string): string | null {
+export function which(name: string): string | null {
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
   const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').concat(['']) : [''];
   for (const dir of dirs) {
@@ -89,7 +89,7 @@ export function resolveClaudeCommand(cliPath: string): CliCommand | null {
   return { file: bin, pre: [] };
 }
 
-function killTree(child: ChildProcess | null): void {
+export function killTree(child: ChildProcess | null): void {
   if (!child || child.exitCode !== null || !child.pid) return;
   try {
     if (process.platform === 'win32') {
@@ -541,6 +541,7 @@ export class ClaudeCliAdapter implements ProviderAdapter {
 export const claudeCliType: ProviderTypeDef = {
   info: {
     type: 'claude_cli',
+    kind: 'llm',
     label: 'Claude Code CLI (Claude-Abo)',
     description:
       'Nutzt die lokal installierte und angemeldete Claude Code CLI – damit laufen Agents über deinen Claude-Plan (Pro/Max). ' +

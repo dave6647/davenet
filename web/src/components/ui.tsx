@@ -124,6 +124,7 @@ const OPP_KIND: Partial<Record<OpportunityStatus, 'ok' | 'warn' | 'err' | 'info'
   RESEARCH: 'info',
   EVALUATION: 'info',
   PROPOSED: 'warn',
+  TESTING: 'accent',
   APPROVED: 'accent',
   DEVELOPMENT: 'accent',
   REVIEW: 'accent',

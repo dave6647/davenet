@@ -13,6 +13,12 @@ const OPP_COLUMNS = [
   'market_score',
   'technical_score',
   'risk_score',
+  'criteria',
+  'knockouts',
+  'legal',
+  'test',
+  'fixed_costs_eur_month',
+  'portfolio_note',
   'confidence',
   'score',
   'sources',
@@ -27,6 +33,12 @@ function mapOpp(r: Record<string, unknown>): Opportunity {
     market_score: numOrNull(r.market_score),
     technical_score: numOrNull(r.technical_score),
     risk_score: numOrNull(r.risk_score),
+    criteria: parseJson(r.criteria, null),
+    knockouts: parseJson(r.knockouts, []),
+    legal: parseJson(r.legal, null),
+    test: parseJson(r.test, null),
+    fixed_costs_eur_month: numOrNull(r.fixed_costs_eur_month),
+    portfolio_note: parseJson(r.portfolio_note, null),
     confidence: numOrNull(r.confidence),
     score: numOrNull(r.score),
     sources: parseJson(r.sources, []),
@@ -99,7 +111,14 @@ export class OpportunityRepo {
 
   update(id: string, patch: Partial<Opportunity>): Opportunity {
     this.require(id);
-    const u = buildUpdate('opportunities', 'id', id, patch as Record<string, unknown>, OPP_COLUMNS, ['sources']);
+    const u = buildUpdate('opportunities', 'id', id, patch as Record<string, unknown>, OPP_COLUMNS, [
+      'sources',
+      'criteria',
+      'knockouts',
+      'legal',
+      'test',
+      'portfolio_note',
+    ]);
     if (u) this.db.run(u.sql, ...u.params);
     return this.require(id);
   }

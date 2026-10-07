@@ -9,6 +9,9 @@ import {
   QUOTA_UNITS,
   SCHEDULE_KINDS,
   TOOL_KEYS,
+  CRITERION_KEYS,
+  FINANCE_KINDS,
+  type CriterionKey,
 } from '../../shared/domain.ts';
 
 const slug = z
@@ -130,8 +133,24 @@ export const OpportunityUpdate = z
     revenue_model: z.string().max(2000),
     notes: z.string().max(10000),
     sources: z.array(sourceSchema),
+    fixed_costs_eur_month: z.number().min(0).max(100000).nullable(),
   })
   .partial();
+
+export const FinanceCreate = z
+  .object({
+    opportunity_id: z.string().nullable().optional(),
+    kind: z.enum(FINANCE_KINDS),
+    amount_eur: z.number().positive().max(10_000_000).nullable().optional(),
+    hours: z.number().positive().max(1000).nullable().optional(),
+    date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable()
+      .optional(),
+    note: z.string().max(500).nullable().optional(),
+  })
+  .refine((e) => (e.kind === 'time' ? e.hours != null : e.amount_eur != null), { message: 'Betrag (€) bzw. Stunden angeben' });
 export const ActionBody = z.object({ action: z.string(), note: z.string().max(5000).nullable().optional() });
 
 export const TaskCreate = z.object({
@@ -184,6 +203,14 @@ export const SettingsUpdate = z
     artifact_context_chars: z.number().int().min(500).max(100_000),
     strategy_context_chars: z.number().int().min(1000).max(50_000),
     job_max_attempts: z.number().int().min(1).max(10),
+    require_demand_test: z.boolean(),
+    guard_test_budget_eur: z.number().min(0).max(100_000),
+    guard_test_owner_hours: z.number().min(0).max(1000),
+    guard_fixed_costs_eur_month: z.number().min(0).max(100_000),
+    guard_max_parallel: z.number().int().min(1).max(50),
+    guard_owner_hours_week: z.number().min(0).max(168),
+    ko_min_demand: z.number().min(0).max(10),
+    criteria_weights: z.object(Object.fromEntries(CRITERION_KEYS.map((k) => [k, z.number().min(0).max(10)])) as Record<CriterionKey, z.ZodNumber>).partial(),
   })
   .partial();
 

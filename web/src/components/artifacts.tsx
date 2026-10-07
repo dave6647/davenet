@@ -18,6 +18,10 @@ const KIND_LABELS: Record<string, string> = {
   directive_plan: 'Auftragsplanung',
   custom_result: 'Ergebnis',
   raw_output: 'Rohausgabe',
+  test_kit: 'Testpaket',
+  test_evaluation: 'Testauswertung',
+  portfolio_review: 'Portfolio-Review',
+  image: 'Bild',
 };
 export const artifactKindLabel = (k: string) => KIND_LABELS[k] ?? k;
 
@@ -33,7 +37,16 @@ export function ArtifactViewer({ id, onClose }: { id: number; onClose: () => voi
           <div className="small muted">
             {artifactKindLabel(data.artifact.kind)} · {fmtDateTime(data.artifact.created_at)} · <span className="mono">company/{data.artifact.path}</span>
           </div>
-          {data.artifact.format === 'json' ? <pre>{data.content}</pre> : <Markdown text={data.content} />}
+          {data.artifact.format === 'png' ? (
+            <>
+              <img src={`/api/memory/raw?path=${encodeURIComponent(data.artifact.path)}`} alt={data.artifact.title} style={{ maxWidth: '100%', borderRadius: 6, marginTop: 8 }} />
+              {data.artifact.summary && <p className="small muted">{data.artifact.summary}</p>}
+            </>
+          ) : data.artifact.format === 'json' ? (
+            <pre>{data.content}</pre>
+          ) : (
+            <Markdown text={data.content} />
+          )}
         </>
       )}
     </Modal>

@@ -1,13 +1,14 @@
 import { useState } from 'react';
-import { OPPORTUNITY_STATUSES, OPPORTUNITY_STATUS_LABELS, type Opportunity, type OpportunityStatus } from '../../../shared/domain.ts';
+import { LEGAL_STATUS_LABELS, OPPORTUNITY_STATUSES, OPPORTUNITY_STATUS_LABELS, TEST_STATUS_LABELS, type Opportunity, type OpportunityStatus } from '../../../shared/domain.ts';
 import { api } from '../api.ts';
-import { Card, Check, ErrorBox, Field, Loading, Modal, OppStatusBadge, PageHead, TextArea, TextInput, useAction } from '../components/ui.tsx';
+import { Badge, Card, Check, ErrorBox, Field, Loading, Modal, OppStatusBadge, PageHead, TextArea, TextInput, useAction } from '../components/ui.tsx';
 import { fmtRelative } from '../format.ts';
 import { useApi } from '../live.ts';
 import { navigate, setQuery, useRoute } from '../router.ts';
 import { NewJobDialog } from './Jobs.tsx';
 
-const BOARD: OpportunityStatus[] = ['DISCOVERED', 'SCREENING', 'RESEARCH', 'EVALUATION', 'PROPOSED', 'APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY', 'DEPLOYED'];
+const BOARD: OpportunityStatus[] = ['DISCOVERED', 'SCREENING', 'RESEARCH', 'EVALUATION', 'PROPOSED', 'TESTING', 'APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY', 'DEPLOYED'];
+const LEGAL_KIND = { green: 'ok', yellow: 'warn', red: 'err' } as const;
 
 export function scoreLabel(o: Opportunity): string {
   if (o.score == null) return '–';
@@ -23,13 +24,13 @@ export function Opportunities() {
   if (opps.error) return <ErrorBox error={opps.error} />;
   if (!opps.data) return <Loading />;
   const list = status ? opps.data.filter((o) => o.status === status) : opps.data;
-  const closed = opps.data.filter((o) => o.status === 'REJECTED' || o.status === 'ON_HOLD');
+  const closed = opps.data.filter((o) => o.status === 'REJECTED' || o.status === 'ON_HOLD' || o.status === 'STOPPED');
 
   return (
     <>
       <PageHead
         title="Opportunities"
-        subtitle="Research- und Opportunity-Pipeline (Konzept §8): entdecken → prüfen → bewerten → Freigabe → Umsetzung → Release."
+        subtitle="Pipeline: entdecken → prüfen → bewerten → Nachfragetest → Bau → Release. Erst wird die Nachfrage belegt, dann gebaut."
         actions={
           <>
             <button onClick={() => setScan(true)}>Research-Zyklus starten</button>
@@ -79,6 +80,8 @@ export function Opportunities() {
                       <div className="small muted">
                         Score {scoreLabel(o)} · {fmtRelative(o.updated_at)}
                       </div>
+                      {o.knockouts.length > 0 && <Badge kind="err">K.-o.</Badge>}
+                      {o.status === 'TESTING' && o.test && <div className="small">Test: {TEST_STATUS_LABELS[o.test.status]}</div>}
                       {o.status_reason && <div className="small muted">{o.status_reason.slice(0, 100)}</div>}
                     </div>
                   ))}
@@ -87,7 +90,7 @@ export function Opportunities() {
             })}
           </div>
           {closed.length > 0 && (
-            <Card title={`Verworfen / zurückgestellt (${closed.length})`}>
+            <Card title={`Verworfen / zurückgestellt / beendet (${closed.length})`}>
               <OppTable list={closed} />
             </Card>
           )}
@@ -114,9 +117,9 @@ function OppTable({ list }: { list: Opportunity[] }) {
             <th>Titel</th>
             <th>Status</th>
             <th className="num">Score</th>
-            <th className="num">Markt</th>
-            <th className="num">Technik</th>
-            <th className="num">Risiko</th>
+            <th className="num">Nachfrage</th>
+            <th>Rechtlich</th>
+            <th>Test</th>
             <th>Aktualisiert</th>
           </tr>
         </thead>
@@ -131,10 +134,19 @@ function OppTable({ list }: { list: Opportunity[] }) {
               <td>
                 <OppStatusBadge status={o.status} />
               </td>
-              <td className="num">{scoreLabel(o)}</td>
-              <td className="num">{o.market_score ?? '–'}</td>
-              <td className="num">{o.technical_score ?? '–'}</td>
-              <td className="num">{o.risk_score ?? '–'}</td>
+              <td className="num">
+                {scoreLabel(o)}
+                {o.knockouts.length > 0 && (
+                  <div>
+                    <Badge kind="err" title={o.knockouts.join('; ')}>
+                      K.-o.
+                    </Badge>
+                  </div>
+                )}
+              </td>
+              <td className="num">{o.criteria?.demand?.score ?? o.market_score ?? '–'}</td>
+              <td>{o.legal ? <Badge kind={LEGAL_KIND[o.legal.status]} title={LEGAL_STATUS_LABELS[o.legal.status]}>{o.legal.status === 'green' ? 'grün' : o.legal.status === 'yellow' ? 'gelb' : 'rot'}</Badge> : <span className="muted">–</span>}</td>
+              <td className="small">{o.test ? TEST_STATUS_LABELS[o.test.status] : <span className="muted">–</span>}</td>
               <td className="small muted nowrap">{fmtRelative(o.updated_at)}</td>
             </tr>
           ))}

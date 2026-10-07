@@ -21,6 +21,7 @@ const AREA_LABELS: Record<string, string> = {
   finance: 'Finanzen',
   decisions: 'Entscheidungen',
   knowledge: 'Wissen',
+  media: 'Bilder',
   audit: 'Audit',
 };
 
@@ -174,6 +175,17 @@ function StrategyInfo({ s }: { s: StrategyStatus }) {
 }
 
 function FileView({ path, editable, onDeleted }: { path: string; editable: boolean; onDeleted: () => void }) {
+  if (/\.(png|jpe?g|webp|gif)$/i.test(path)) {
+    return (
+      <Card title={<span className="mono">{path}</span>}>
+        <img src={`/api/memory/raw${qs({ path })}`} alt={path} style={{ maxWidth: '100%', borderRadius: 6 }} />
+      </Card>
+    );
+  }
+  return <TextFileView path={path} editable={editable} onDeleted={onDeleted} />;
+}
+
+function TextFileView({ path, editable, onDeleted }: { path: string; editable: boolean; onDeleted: () => void }) {
   const file = useApi<{ path: string; content: string }>(`/api/memory/file${qs({ path })}`, ['memory']);
   const [edit, setEdit] = useState(false);
   const [text, setText] = useState('');

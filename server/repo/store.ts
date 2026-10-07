@@ -7,6 +7,7 @@ import { ApprovalRepo } from './approvals.ts';
 import { ArtifactRepo, AuditRepo } from './records.ts';
 import { LedgerRepo } from './ledger.ts';
 import { ScheduleRepo, SettingsRepo } from './schedules.ts';
+import { FinanceRepo } from './finance.ts';
 
 /** Bündelt alle Repositories über einer Datenbank-Verbindung. */
 export class Store {
@@ -24,6 +25,7 @@ export class Store {
   readonly ledger: LedgerRepo;
   readonly schedules: ScheduleRepo;
   readonly settings: SettingsRepo;
+  readonly finance: FinanceRepo;
 
   constructor(readonly db: Db) {
     this.departments = new DepartmentRepo(db);
@@ -40,6 +42,7 @@ export class Store {
     this.ledger = new LedgerRepo(db);
     this.schedules = new ScheduleRepo(db);
     this.settings = new SettingsRepo(db);
+    this.finance = new FinanceRepo(db);
   }
 
   tx<T>(fn: () => T): T {

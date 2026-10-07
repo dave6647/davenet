@@ -3,6 +3,7 @@ import { TASK_STATUS_LABELS } from '../../../shared/domain.ts';
 import { Workspace } from '../workspace.ts';
 import type { JobContext, JobTypeDef } from './types.ts';
 import { artifactSection, opportunitySection, strategySection } from './common.ts';
+import { imageRequestsField } from './schemas.ts';
 
 // ---------------------------------------------------------------- Technische Planung
 
@@ -66,6 +67,7 @@ const ImplementationOutput = z.object({
   files_changed: z.array(z.string()).describe('angelegte/geänderte Dateien (relativ zum Workspace)'),
   notes_for_reviewer: z.string().describe('Hinweise für das Review'),
   open_issues: z.array(z.string()).describe('bekannte offene Punkte'),
+  image_requests: imageRequestsField(),
 });
 
 function workspaceListing(ctx: JobContext): string {
@@ -119,6 +121,8 @@ export const implementation: JobTypeDef<z.infer<typeof ImplementationOutput>> = 
         'lege Dateien mit relativen Pfaden an. Halte dich an Spezifikation und Akzeptanzkriterien und ändere nur, was für diese Task nötig ist.',
         'Pflege eine knappe README.md im Workspace (Zweck, Aufbau, Start). Keine Zugangsdaten oder Geheimnisse in Dateien.',
         'Es gibt keine Shell: Nichts installieren oder ausführen – schreibe lauffähigen Code und dokumentiere die nötigen Schritte.',
+        'Grafiken wie Logos, Icons und Schrift-Designs erstellst du selbst als SVG. Rasterbilder (Fotos, Illustrationen) forderst du',
+        'über image_requests an; sie landen später unter assets/ im Workspace.',
         feedback ? 'Dies ist eine Nacharbeit: Behebe die Findings aus dem Review vollständig.' : '',
       ]
         .filter(Boolean)

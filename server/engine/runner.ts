@@ -1,6 +1,6 @@
 import type { Agent, Job, Model, Provider } from '../../shared/domain.ts';
 import { planInfoByProvider } from '../providers/claude-cli.ts';
-import { createAdapter } from '../providers/registry.ts';
+import { createAdapter, createImageAdapter } from '../providers/registry.ts';
 import { ProviderError, type CallUsage, type ModelCallRequest, type ProviderAdapter } from '../providers/types.ts';
 import { extractJson } from './json.ts';
 import { jobType } from './jobtypes/index.ts';
@@ -68,7 +68,7 @@ export class JobRunner {
     const capability = (job.type !== 'custom' && route?.capability_override) || agent.capability;
     const settings = this.orch.settings;
     const now = new Date();
-    const decision = this.router.route({ job, agent, capability, settings, now, runningByProvider });
+    const decision = this.router.route({ job, agent, capability, settings, now, runningByProvider, kind: def.providerKind ?? 'llm' });
 
     switch (decision.kind) {
       case 'defer':
@@ -156,7 +156,36 @@ export class JobRunner {
     return this.store.jobs.get(jobId)?.status === 'CANCELLED';
   }
 
+  /** Bild-Job: direkt beim Bild-Provider, ohne Sprachmodell. */
+  private async executeImage(job: Job, agent: Agent, def: JobTypeDef, c: Candidate, controller: AbortController): Promise<void> {
+    const { provider, model } = c;
+    try {
+      const ctx = this.orch.jobContext(job, agent);
+      const spec = def.image!.request(ctx);
+      if (!spec.prompt) throw new Error('Keine Bildbeschreibung angegeben');
+      const adapter = createImageAdapter(provider, { secrets: this.orch.secrets, dataDir: this.orch.dataDir });
+      const result = await adapter.generate({
+        ...spec,
+        model: model.model_name,
+        timeoutMs: Math.max(60, agent.max_runtime_sec) * 1000,
+        signal: controller.signal,
+        log: (msg, level) => this.log(job.id, msg, level ?? 'info'),
+      });
+      this.recordUsage(job, agent, provider, model, result.usage, result.model, 'image');
+      if (this.cancelled(job.id)) return;
+      const fresh = this.orch.jobContext(this.store.jobs.require(job.id), agent);
+      const output = await def.image!.complete(fresh, result, { providerId: provider.id });
+      this.store.jobs.update(job.id, { status: 'COMPLETED', output, finished_at: new Date().toISOString(), error: null });
+      this.log(job.id, `Abgeschlossen: ${String(output.file ?? '')}`);
+      this.orch.audit(`agent:${agent.id}`, 'job.completed', 'job', job.id, 1, { type: job.type, provider: provider.id, model: result.model });
+    } catch (e) {
+      if (e instanceof ProviderError) this.handleProviderError(job, provider, e);
+      else if (!this.cancelled(job.id)) this.fail(this.store.jobs.require(job.id), e instanceof Error ? e.message : String(e));
+    }
+  }
+
   private async execute(job: Job, agent: Agent, def: JobTypeDef, c: Candidate, controller: AbortController): Promise<void> {
+    if (def.image) return this.executeImage(job, agent, def, c, controller);
     const { provider, model } = c;
     const settings = this.orch.settings;
     try {

@@ -156,3 +156,52 @@ export const customJob: JobTypeDef<z.infer<typeof CustomOutput>> = {
   complete: (ctx, out) =>
     ctx.orch.saveReport(ctx, ctx.opportunity ? 'research' : 'knowledge', 'custom_result', `Ergebnis: ${ctx.job.title.replace(/^Auftrag: /, '')}`, out),
 };
+
+// ---------------------------------------------------------------- Monatlicher Portfolio-Review (Strategie §8)
+
+const PortfolioOutput = z.object({
+  summary_markdown: z.string().describe('Portfolio-Review für den Owner in Markdown, max. 500 Wörter'),
+  items: z
+    .array(
+      z.object({
+        opportunity_id: z.string().describe('Opportunity-ID, z. B. OPP-0001'),
+        recommendation: z.enum(['keep', 'expand', 'adjust', 'stop']).describe('behalten, ausbauen, anpassen oder beenden'),
+        reason: z.string().describe('Begründung mit Zahlen, max. 50 Wörter'),
+        forecast: z.string().describe('Prognose für die nächsten Monate, max. 30 Wörter'),
+      }),
+    )
+    .describe('genau eine Empfehlung je laufendem Test und Produkt'),
+  next_test_candidate_id: z.string().describe('Opportunity-ID des besten nächsten Testkandidaten oder leer'),
+  next_test_reason: z.string().describe('Begründung, max. 40 Wörter'),
+  owner_actions: z.array(z.string()).describe('konkrete Entscheidungen oder Schritte für den Owner'),
+});
+
+export const portfolioReview: JobTypeDef<z.infer<typeof PortfolioOutput>> = {
+  key: 'portfolio_review',
+  label: 'Portfolio-Review',
+  description: 'Monatlicher Review aller Tests und Produkte: Aufwand, Kosten, Erträge, Prognose und Empfehlung (behalten, ausbauen, anpassen, beenden).',
+  departmentHint: 'Unternehmensleitung',
+  defaultAgent: 'EXECUTIVE_ORCHESTRATOR',
+  tools: [],
+  manual: true,
+  inputFields: [{ key: 'focus', label: 'Besondere Fragen (optional)', type: 'textarea' }],
+  output: PortfolioOutput,
+  title: () => `Portfolio-Review ${new Date().toISOString().slice(0, 7)}`,
+  buildPrompt: ({ orch, job }) => {
+    const focus = String(job.input.focus ?? '').trim();
+    return {
+      task: [
+        'Erstelle den Portfolio-Review für den Owner. Bewerte jeden laufenden Test und jedes Produkt anhand der gelieferten Zahlen:',
+        'Stand, Owner-Zeit, Kosten, Erträge und Prognose. Empfiehl je Eintrag behalten, ausbauen, anpassen oder beenden.',
+        'Abbruchregel: beenden, wenn Aufwand oder Kosten den Ertrag stark übersteigen und keine realistische Besserung absehbar ist –',
+        'Tests erst am Ende ihrer Laufzeit. Prüfe die Leitplanken (Plätze, Owner-Zeit, Fixkosten) und nenne den besten nächsten',
+        'Testkandidaten, falls ein Platz frei ist. Rechne nur mit den gelieferten Zahlen; fehlende Angaben benennen statt schätzen.',
+        focus ? `Besondere Fragen des Owners: ${focus}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      sections: [{ title: 'Portfolio-Daten', body: orch.portfolioFacts(), priority: 10, maxChars: 20000 }, strategySection(orch, 7)],
+    };
+  },
+  complete: (ctx, out) => ctx.orch.applyPortfolioReview(ctx, out),
+};

@@ -1,7 +1,23 @@
 import { useEffect, useState } from 'react';
-import type { Approval, Artifact, Job, Opportunity, Task } from '../../../shared/domain.ts';
+import {
+  CRITERIA,
+  LEGAL_STATUS_LABELS,
+  TEST_STATUS_LABELS,
+  TEST_VERDICT_LABELS,
+  type Approval,
+  type Artifact,
+  type FinanceEntry,
+  type FinanceTotals,
+  type Job,
+  type LegalStatus,
+  type Opportunity,
+  type Task,
+  type TestPlan,
+  type TestStatus,
+} from '../../../shared/domain.ts';
 import { api, qs } from '../api.ts';
 import { ArtifactList, ArtifactViewer } from '../components/artifacts.tsx';
+import { FinanceEntryDialog, FinanceEntryTable, FinanceTotalsView, fmtEur, fmtHours } from '../components/finance.tsx';
 import {
   ApprovalStatusBadge,
   Badge,
@@ -10,6 +26,7 @@ import {
   ErrorBox,
   Field,
   JobStatusBadge,
+  NumberInput,
   Loading,
   Markdown,
   Modal,
@@ -21,10 +38,11 @@ import {
   TextInput,
   useAction,
 } from '../components/ui.tsx';
-import { fmtDateTime, fmtRelative, fmtTokens, fmtUsd } from '../format.ts';
+import { fmtDate, fmtDateTime, fmtRelative, fmtTokens, fmtUsd } from '../format.ts';
 import { useApi } from '../live.ts';
 import { useJobTypeLabel } from '../meta.tsx';
 import { navigate } from '../router.ts';
+import { RecommendationBadge } from './Portfolio.tsx';
 
 interface Detail {
   opportunity: Opportunity;
@@ -36,10 +54,11 @@ interface Detail {
   workspace: { dir: string; files: { path: string; size: number }[] };
 }
 
-type Tab = 'overview' | 'project' | 'artifacts' | 'jobs';
+type Tab = 'overview' | 'test' | 'project' | 'artifacts' | 'jobs';
 
 const PRE_APPROVAL = ['DISCOVERED', 'SCREENING', 'RESEARCH', 'EVALUATION', 'PROPOSED', 'REJECTED', 'ON_HOLD'];
 const IN_PROJECT = ['APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY', 'DEPLOYED'];
+const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
 
 export function OpportunityPage({ id }: { id: string }) {
   const { data, error } = useApi<Detail>(`/api/opportunities/${id}`, ['opportunity', 'task', 'job', 'approval', 'ledger']);
@@ -50,6 +69,7 @@ export function OpportunityPage({ id }: { id: string }) {
 
   useEffect(() => {
     if (data && IN_PROJECT.includes(data.opportunity.status) && tab === 'overview' && data.tasks.length) setTab('project');
+    else if (data && data.opportunity.status === 'TESTING' && tab === 'overview') setTab('test');
     // nur beim ersten Laden umschalten
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.opportunity.id]);
@@ -70,7 +90,10 @@ export function OpportunityPage({ id }: { id: string }) {
     }, 'Opportunity gelöscht');
 
   const pre = PRE_APPROVAL.includes(o.status);
+  const testing = o.status === 'TESTING';
   const project = IN_PROJECT.includes(o.status) && o.status !== 'DEPLOYED';
+  const testStatus = o.test?.status;
+  const pendingTest = data.approvals.some((a) => a.status === 'PENDING' && a.type === 'TEST_START');
 
   return (
     <>
@@ -112,8 +135,40 @@ export function OpportunityPage({ id }: { id: string }) {
               <button disabled={busy} onClick={() => action('evaluate')}>
                 Bewerten
               </button>
-              <button disabled={busy || o.status === 'PROPOSED'} onClick={() => action('propose')} title="Legt dir den Projektstart zur Freigabe vor">
-                Zur Freigabe vorlegen
+              <button
+                disabled={busy || !o.test?.plan || pendingTest}
+                onClick={() => action('propose_test')}
+                title={o.test?.plan ? 'Legt dir den kleinen Nachfragetest zur Freigabe vor' : 'Testplan entsteht bei der Bewertung'}
+              >
+                Nachfragetest vorschlagen
+              </button>
+              <button disabled={busy} onClick={() => action('propose')} title="Ohne Nachfragetest direkt den Bau zur Freigabe vorlegen">
+                Bau direkt vorschlagen
+              </button>
+            </>
+          )}
+          {testing && (
+            <>
+              {(testStatus === 'READY' || testStatus === 'PREPARING') && (
+                <button className="primary" disabled={busy} onClick={() => action('test_live')} title="Deine Schritte sind erledigt – die Testlaufzeit beginnt">
+                  Test ist live
+                </button>
+              )}
+              {(testStatus === 'READY' || testStatus === 'RUNNING') && (
+                <button
+                  disabled={busy}
+                  onClick={() => setActionNote({ action: 'test_result', label: 'Testergebnis erfassen', help: 'Was ist passiert? Zahlen und Beobachtungen (z. B. 3 Verkäufe, 40 Besuche, 2 Anfragen)' })}
+                >
+                  Ergebnis erfassen
+                </button>
+              )}
+              {o.test?.result && testStatus !== 'EVALUATING' && (
+                <button disabled={busy} onClick={() => action('evaluate_test')}>
+                  Erneut auswerten
+                </button>
+              )}
+              <button disabled={busy || data.approvals.some((a) => a.status === 'PENDING' && a.type === 'PROJECT_START')} onClick={() => action('propose')}>
+                Bau vorschlagen
               </button>
             </>
           )}
@@ -131,17 +186,22 @@ export function OpportunityPage({ id }: { id: string }) {
             </>
           )}
           <span className="spacer" />
-          {o.status !== 'REJECTED' && o.status !== 'DEPLOYED' && (
+          {pre && o.status !== 'REJECTED' && (
             <button className="danger" disabled={busy} onClick={() => setActionNote({ action: 'reject', label: 'Verwerfen', help: 'Begründung (optional)' })}>
               Verwerfen
             </button>
           )}
-          {o.status !== 'ON_HOLD' && o.status !== 'DEPLOYED' && (
+          {(testing || IN_PROJECT.includes(o.status)) && (
+            <button className="danger" disabled={busy} onClick={() => setActionNote({ action: 'stop', label: 'Beenden', help: 'Warum wird beendet? Laufende Listings, Abos oder Verträge beendest du selbst.' })}>
+              Beenden
+            </button>
+          )}
+          {o.status !== 'ON_HOLD' && pre && (
             <button disabled={busy} onClick={() => action('hold')}>
               Zurückstellen
             </button>
           )}
-          {(o.status === 'REJECTED' || o.status === 'ON_HOLD') && (
+          {(o.status === 'REJECTED' || o.status === 'ON_HOLD' || o.status === 'STOPPED') && (
             <button disabled={busy} onClick={() => action('reopen')}>
               Wieder öffnen
             </button>
@@ -157,6 +217,7 @@ export function OpportunityPage({ id }: { id: string }) {
         onChange={setTab}
         tabs={[
           { key: 'overview', label: 'Überblick' },
+          { key: 'test', label: o.test ? `Test & Zahlen (${TEST_STATUS_LABELS[o.test.status]})` : 'Test & Zahlen' },
           { key: 'project', label: `Projekt & Tasks (${data.tasks.length})` },
           { key: 'artifacts', label: `Artefakte (${data.artifacts.length})` },
           { key: 'jobs', label: `Jobs (${data.jobs.length})` },
@@ -164,6 +225,7 @@ export function OpportunityPage({ id }: { id: string }) {
       />
 
       {tab === 'overview' && <Overview d={data} />}
+      {tab === 'test' && <TestAndNumbers d={data} />}
       {tab === 'project' && <Project d={data} />}
       {tab === 'artifacts' && (
         <Card>
@@ -262,6 +324,7 @@ function Overview({ d }: { d: Detail }) {
   ];
   return (
     <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 2fr) minmax(260px, 1fr)' }}>
+      <div className="grid" style={{ alignContent: 'start' }}>
       <Card
         title="Opportunity-Artefakt"
         actions={
@@ -303,19 +366,30 @@ function Overview({ d }: { d: Detail }) {
           </dl>
         )}
       </Card>
+      {o.criteria && <CriteriaCard o={o} />}
+      </div>
       <div className="grid" style={{ alignContent: 'start' }}>
         <Card title="Bewertung">
           <div className="stat">
             <span className="label">Gesamt-Score</span>
             <span className="value">{o.score ?? '–'}</span>
           </div>
+          {o.knockouts.length > 0 && (
+            <div className="alert error small" style={{ marginTop: 8 }}>
+              K.-o.: {o.knockouts.join('; ')}
+            </div>
+          )}
           <dl className="kv" style={{ marginTop: 8 }}>
-            <dt>Markt</dt>
-            <dd>{o.market_score ?? '–'} / 10</dd>
-            <dt>Technik</dt>
-            <dd>{o.technical_score ?? '–'} / 10</dd>
-            <dt>Risiko</dt>
-            <dd>{o.risk_score ?? '–'} / 10 (hoch = riskant)</dd>
+            {!o.criteria && o.market_score != null && (
+              <>
+                <dt>Markt</dt>
+                <dd>{o.market_score} / 10</dd>
+                <dt>Technik</dt>
+                <dd>{o.technical_score ?? '–'} / 10</dd>
+                <dt>Risiko</dt>
+                <dd>{o.risk_score ?? '–'} / 10 (hoch = riskant)</dd>
+              </>
+            )}
             <dt>Konfidenz</dt>
             <dd>{o.confidence ?? '–'}</dd>
             <dt>Herkunft</dt>
@@ -324,6 +398,14 @@ function Overview({ d }: { d: Detail }) {
             <dd>{fmtDateTime(o.created_at)}</dd>
           </dl>
         </Card>
+        <LegalCard o={o} />
+        {o.portfolio_note && (
+          <Card title="Portfolio-Review">
+            <RecommendationBadge r={o.portfolio_note.recommendation} /> <span className="small muted">{fmtDate(o.portfolio_note.at)}</span>
+            <p className="small">{o.portfolio_note.reason}</p>
+            {o.portfolio_note.forecast && <p className="small muted">Prognose: {o.portfolio_note.forecast}</p>}
+          </Card>
+        )}
         {d.usage && (
           <Card title="Verbrauch (gesamt)">
             <dl className="kv">
@@ -503,6 +585,17 @@ function Project({ d }: { d: Detail }) {
 }
 
 function WorkspaceFile({ oppId, path, onClose }: { oppId: string; path: string; onClose: () => void }) {
+  if (IMAGE_FILE.test(path)) {
+    return (
+      <Modal title={path} onClose={onClose} wide>
+        <img src={`/api/opportunities/${oppId}/workspace/raw${qs({ path })}`} alt={path} style={{ maxWidth: '100%', borderRadius: 6 }} />
+      </Modal>
+    );
+  }
+  return <WorkspaceTextFile oppId={oppId} path={path} onClose={onClose} />;
+}
+
+function WorkspaceTextFile({ oppId, path, onClose }: { oppId: string; path: string; onClose: () => void }) {
   const { data, error } = useApi<{ content: string }>(`/api/opportunities/${oppId}/workspace${qs({ path })}`);
   return (
     <Modal title={path} onClose={onClose} wide>
@@ -551,5 +644,267 @@ function TaskDialog({ oppId, onClose }: { oppId: string; onClose: () => void }) 
         <TextInput value={f.depends} onChange={(v) => setF({ ...f, depends: v })} />
       </Field>
     </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- Bewertung, Rechtsprüfung, Test & Zahlen
+
+function ScoreBar({ v }: { v: number }) {
+  return (
+    <div className={`bar ${v < 4 ? 'err' : v < 6 ? 'warn' : ''}`} style={{ width: 110 }} role="meter" aria-valuenow={v} aria-valuemin={0} aria-valuemax={10}>
+      <span style={{ width: `${Math.max(0, Math.min(10, v)) * 10}%` }} />
+    </div>
+  );
+}
+
+function CriteriaCard({ o }: { o: Opportunity }) {
+  const c = o.criteria ?? {};
+  return (
+    <Card title="Bewertung nach 13 Kriterien" actions={<span className="small muted">10 = am besten, auch bei Aufwand und Risiko</span>}>
+      <div className="table-wrap">
+        <table>
+          <tbody>
+            {CRITERIA.map((k) => {
+              const v = c[k.key];
+              return (
+                <tr key={k.key}>
+                  <td className="nowrap" title={k.question}>
+                    {k.label}
+                  </td>
+                  <td className="nowrap">{v ? <ScoreBar v={v.score} /> : null}</td>
+                  <td className="num nowrap">{v ? v.score : '–'}</td>
+                  <td className="small muted">{v?.note || ''}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+const LEGAL_KIND: Record<LegalStatus, 'ok' | 'warn' | 'err'> = { green: 'ok', yellow: 'warn', red: 'err' };
+
+function LegalCard({ o }: { o: Opportunity }) {
+  const l = o.legal;
+  if (!l) {
+    return (
+      <Card title="Rechtliche Prüfung">
+        <div className="muted small">Noch nicht geprüft – entsteht im Screening (vorläufig) und in der Tiefenrecherche.</div>
+      </Card>
+    );
+  }
+  const h = (v: number | null) => (v == null ? '–' : v.toLocaleString('de-DE'));
+  return (
+    <Card title="Rechtliche Prüfung" actions={<span className="small muted">{l.source === 'research' ? 'Tiefenrecherche' : 'Screening (vorläufig)'}</span>}>
+      <Badge kind={LEGAL_KIND[l.status]}>{LEGAL_STATUS_LABELS[l.status]}</Badge>
+      {l.how_possible && <p className="small">{l.how_possible}</p>}
+      {l.source === 'research' && (
+        <p className="small muted">
+          Aufwand einmalig {h(l.effort_one_time_hours)} Std. / {h(l.effort_one_time_eur)} € · laufend {h(l.effort_ongoing_hours_month)} Std. /{' '}
+          {h(l.effort_ongoing_eur_month)} € pro Monat
+        </p>
+      )}
+      {l.steps.length > 0 && (
+        <ol className="small" style={{ paddingLeft: 18 }}>
+          {l.steps.map((s, i) => (
+            <li key={i}>
+              <strong>{s.step}</strong>
+              {s.details && <span className="muted"> – {s.details}</span>}
+            </li>
+          ))}
+        </ol>
+      )}
+      {l.open_questions.length > 0 && (
+        <>
+          <div className="small">
+            <strong>Offene Fragen</strong>
+          </div>
+          <ul className="small" style={{ paddingLeft: 18 }}>
+            {l.open_questions.map((q, i) => (
+              <li key={i}>{q}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      <div className="small muted">Keine Rechtsberatung – im Zweifel fachlich prüfen lassen.</div>
+    </Card>
+  );
+}
+
+const TEST_KIND: Record<TestStatus, 'ok' | 'warn' | 'err' | 'info' | 'accent'> = {
+  PROPOSED: 'warn',
+  PREPARING: 'info',
+  READY: 'warn',
+  RUNNING: 'accent',
+  EVALUATING: 'info',
+  PASSED: 'ok',
+  FAILED: 'err',
+};
+
+function PlanView({ p }: { p: TestPlan }) {
+  return (
+    <>
+      <dl className="kv">
+        <dt>Hypothese</dt>
+        <dd>{p.hypothesis}</dd>
+        <dt>Kanal</dt>
+        <dd>{p.channel}</dd>
+        <dt>Budget</dt>
+        <dd>
+          {fmtEur(p.budget_eur)} extern · {fmtHours(p.owner_hours)} deine Zeit
+        </dd>
+        <dt>Laufzeit</dt>
+        <dd>{p.duration_days} Tage</dd>
+        <dt>Messgröße</dt>
+        <dd>{p.metric}</dd>
+        <dt>Erfolg, wenn</dt>
+        <dd>
+          <strong>{p.success_criterion}</strong>
+        </dd>
+      </dl>
+      <div className="grid grid-2" style={{ marginTop: 10 }}>
+        <div>
+          <strong className="small">Deine Schritte</strong>
+          <ul className="small" style={{ paddingLeft: 18 }}>
+            {p.owner_steps.length ? p.owner_steps.map((x, i) => <li key={i}>{x}</li>) : <li className="muted">keine</li>}
+          </ul>
+        </div>
+        <div>
+          <strong className="small">Bereitet Davenet vor</strong>
+          <ul className="small" style={{ paddingLeft: 18 }}>
+            {p.materials.length ? p.materials.map((x, i) => <li key={i}>{x}</li>) : <li className="muted">nichts</li>}
+          </ul>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function sumEntries(entries: FinanceEntry[], since?: string): FinanceTotals {
+  const t: FinanceTotals = { revenue_eur: 0, expense_eur: 0, hours: 0, entries: 0 };
+  for (const e of entries) {
+    if (since && e.date < since) continue;
+    t.entries++;
+    if (e.kind === 'revenue') t.revenue_eur += e.amount_eur ?? 0;
+    else if (e.kind === 'expense') t.expense_eur += e.amount_eur ?? 0;
+    else t.hours += e.hours ?? 0;
+  }
+  return t;
+}
+
+function TestAndNumbers({ d }: { d: Detail }) {
+  const o = d.opportunity;
+  const t = o.test;
+  const entries = useApi<FinanceEntry[]>(`/api/finance/entries${qs({ opportunity_id: o.id, limit: 500 })}`, ['finance']);
+  const [add, setAdd] = useState(false);
+  const [fixed, setFixed] = useState<number | null>(o.fixed_costs_eur_month);
+  const [kit, setKit] = useState<number | null>(null);
+  const { run, busy } = useAction();
+  useEffect(() => setFixed(o.fixed_costs_eur_month), [o.fixed_costs_eur_month]);
+  const testKit = d.artifacts.find((a) => a.kind === 'test_kit');
+  const evaluation = d.artifacts.find((a) => a.kind === 'test_evaluation');
+  const list = entries.data ?? [];
+  const since30 = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10);
+  const saveFixed = () => run(() => api.put(`/api/opportunities/${o.id}`, { fixed_costs_eur_month: fixed }), 'Fixkosten gespeichert');
+
+  return (
+    <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 3fr) minmax(280px, 2fr)' }}>
+      <div className="grid" style={{ alignContent: 'start' }}>
+        <Card
+          title={t ? `Nachfragetest${t.attempt > 1 ? ` – Versuch ${t.attempt}` : ''}` : 'Nachfragetest'}
+          actions={t && <Badge kind={TEST_KIND[t.status]}>{TEST_STATUS_LABELS[t.status]}</Badge>}
+        >
+          {!t ? (
+            <div className="empty">Noch kein Testplan. Er entsteht bei der Bewertung – erst wird die Nachfrage getestet, dann gebaut.</div>
+          ) : (
+            <>
+              {t.guardrail_issues.length > 0 && <div className="alert warn small">Leitplanken überschritten: {t.guardrail_issues.join('; ')}</div>}
+              {(t.started_at || t.ends_at) && (
+                <div className="small" style={{ marginBottom: 8 }}>
+                  {t.started_at && <>Gestartet {fmtDate(t.started_at)} · </>}
+                  {t.ends_at && (
+                    <>
+                      geplantes Ende <strong>{fmtDate(t.ends_at)}</strong> ({fmtRelative(t.ends_at)})
+                    </>
+                  )}
+                </div>
+              )}
+              <PlanView p={t.plan} />
+              {testKit && (
+                <div className="small" style={{ marginTop: 8 }}>
+                  <button className="link" onClick={() => setKit(testKit.id)}>
+                    Testpaket mit Checkliste öffnen
+                  </button>
+                </div>
+              )}
+              {t.result && (
+                <div className="card" style={{ background: 'var(--panel-2)', marginTop: 10 }}>
+                  <strong className="small">Ergebnis laut dir</strong> <span className="small muted">{fmtDateTime(t.result.recorded_at)}</span>
+                  <div className="small">
+                    <Markdown text={t.result.notes} />
+                  </div>
+                </div>
+              )}
+              {t.evaluation && (
+                <div className="card" style={{ background: 'var(--panel-2)', marginTop: 10 }}>
+                  <strong className="small">Auswertung: {TEST_VERDICT_LABELS[t.evaluation.verdict]}</strong>{' '}
+                  <Badge kind={t.evaluation.success_criterion_met ? 'ok' : 'err'}>{t.evaluation.success_criterion_met ? 'Kriterium erfüllt' : 'Kriterium verfehlt'}</Badge>
+                  <div className="small">
+                    <Markdown text={t.evaluation.summary} />
+                  </div>
+                  {evaluation && (
+                    <button className="link small" onClick={() => setKit(evaluation.id)}>
+                      Auswertung öffnen
+                    </button>
+                  )}
+                </div>
+              )}
+              {t.history.length > 0 && (
+                <details style={{ marginTop: 10 }}>
+                  <summary className="small">Frühere Versuche ({t.history.length})</summary>
+                  {t.history.map((h) => (
+                    <div key={h.attempt} className="small" style={{ marginTop: 6 }}>
+                      <strong>Versuch {h.attempt}:</strong> {h.plan.channel} – {h.evaluation ? `${TEST_VERDICT_LABELS[h.evaluation.verdict]}: ${h.evaluation.summary}` : 'ohne Auswertung'}
+                    </div>
+                  ))}
+                </details>
+              )}
+            </>
+          )}
+        </Card>
+      </div>
+      <div className="grid" style={{ alignContent: 'start' }}>
+        <Card title="Einnahmen & Aufwand" actions={<button className="small" onClick={() => setAdd(true)}>+ Buchung</button>}>
+          <div className="grid grid-2">
+            <div>
+              <div className="small muted">Gesamt</div>
+              <FinanceTotalsView t={sumEntries(list)} />
+            </div>
+            <div>
+              <div className="small muted">Letzte 30 Tage</div>
+              <FinanceTotalsView t={sumEntries(list, since30)} />
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: 10 }}>
+            <Field label="Laufende Fixkosten (€/Monat)">
+              <NumberInput value={fixed} onChange={setFixed} step={1} min={0} />
+            </Field>
+            <button className="small" disabled={busy || fixed === o.fixed_costs_eur_month} onClick={saveFixed} style={{ alignSelf: 'flex-end' }}>
+              Speichern
+            </button>
+          </div>
+          {d.usage && (
+            <p className="small muted" style={{ marginBottom: 0 }}>
+              KI-Kosten: {fmtUsd(d.usage.monetary_cost_usd)} real (Gegenwert {fmtUsd(d.usage.equivalent_cost_usd)})
+            </p>
+          )}
+        </Card>
+        <Card title={`Buchungen (${list.length})`}>{entries.data ? <FinanceEntryTable entries={list} /> : <Loading />}</Card>
+      </div>
+      {add && <FinanceEntryDialog opportunityId={o.id} onClose={() => setAdd(false)} />}
+      {kit != null && <ArtifactViewer id={kit} onClose={() => setKit(null)} />}
+    </div>
   );
 }

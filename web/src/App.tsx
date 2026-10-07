@@ -16,6 +16,7 @@ import { Opportunities } from './pages/Opportunities.tsx';
 import { OpportunityPage } from './pages/OpportunityPage.tsx';
 import { Approvals } from './pages/Approvals.tsx';
 import { Finance } from './pages/Finance.tsx';
+import { Portfolio } from './pages/Portfolio.tsx';
 import { Triggers } from './pages/Triggers.tsx';
 import { Memory } from './pages/Memory.tsx';
 import { Audit } from './pages/Audit.tsx';
@@ -35,6 +36,7 @@ const NAV: { path: string; label: string; match: string[] }[] = [
   { path: '/jobs', label: 'Jobs', match: ['jobs'] },
   { path: '/opportunities', label: 'Opportunities', match: ['opportunities'] },
   { path: '/approvals', label: 'Freigaben', match: ['approvals'] },
+  { path: '/portfolio', label: 'Portfolio & Erträge', match: ['portfolio'] },
   { path: '/finance', label: 'Kosten & Kontingente', match: ['finance'] },
   { path: '/triggers', label: 'Trigger', match: ['triggers'] },
   { path: '/memory', label: 'Gedächtnis', match: ['memory'] },
@@ -82,6 +84,9 @@ function Shell() {
     case 'finance':
       page = <Finance />;
       break;
+    case 'portfolio':
+      page = <Portfolio />;
+      break;
     case 'triggers':
       page = <Triggers />;
       break;
@@ -106,7 +111,7 @@ function Shell() {
         </div>
         {NAV.map((n, i) => (
           <div key={n.path}>
-            {(i === 3 || i === 6 || i === 8) && <div className="nav-sep" />}
+            {(i === 3 || i === 7 || i === 9) && <div className="nav-sep" />}
             <a href={`#${n.path}`} className={`nav-item ${n.match.includes(section) ? 'active' : ''}`}>
               {n.label}
               {n.path === '/approvals' && engine.data?.pending_approvals ? <span className="nav-count">{engine.data.pending_approvals}</span> : null}

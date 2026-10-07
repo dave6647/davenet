@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Settings } from '../../../shared/domain.ts';
+import { CRITERIA, KO_SCORE_CAP, type CriterionKey, type Settings } from '../../../shared/domain.ts';
 import { api } from '../api.ts';
 import { Card, Check, ErrorBox, Field, Loading, NumberInput, PageHead, TextInput, useAction } from '../components/ui.tsx';
 import { useApi } from '../live.ts';
@@ -98,19 +98,46 @@ export function SettingsPage() {
             </Field>
           </div>
         </Card>
-        <Card title="Scoring-Gewichte">
+        <Card title="Leitplanken (Strategie)">
+          <div className="form-grid">
+            <Field label="Testbudget je Test (€)" help="externe Kosten; KI-Nutzung im Davenet-Budget zählt nicht">
+              <NumberInput value={s.guard_test_budget_eur} onChange={(v) => set('guard_test_budget_eur', v ?? 0)} step={1} min={0} />
+            </Field>
+            <Field label="Deine Zeit je Test (Std.)">
+              <NumberInput value={s.guard_test_owner_hours} onChange={(v) => set('guard_test_owner_hours', v ?? 0)} step={0.5} min={0} />
+            </Field>
+            <Field label="Fixkosten je Produkt (€/Monat)" help="solange das Produkt sie nicht selbst einspielt">
+              <NumberInput value={s.guard_fixed_costs_eur_month} onChange={(v) => set('guard_fixed_costs_eur_month', v ?? 0)} step={1} min={0} />
+            </Field>
+            <Field label="Tests/Projekte gleichzeitig (max.)" help="Freigaben darüber hinaus warten auf einen freien Platz">
+              <NumberInput value={s.guard_max_parallel} onChange={(v) => set('guard_max_parallel', v ?? 1)} min={1} />
+            </Field>
+            <Field label="Deine Zeit insgesamt (Std./Woche)" help="aus den Buchungen „Owner-Zeit“">
+              <NumberInput value={s.guard_owner_hours_week} onChange={(v) => set('guard_owner_hours_week', v ?? 0)} step={1} min={0} />
+            </Field>
+            <Field label="Vor dem Bau">
+              <Check checked={s.require_demand_test} onChange={(v) => set('require_demand_test', v)} label="zuerst einen Nachfragetest vorschlagen" />
+            </Field>
+          </div>
+        </Card>
+        <Card title="Bewertung (13 Kriterien)">
           <p className="small muted" style={{ marginTop: 0 }}>
-            Gesamt-Score = gewichteter Mittelwert aus Markt, Technik und (10 − Risiko), skaliert auf 0–100.
+            Gesamt-Score 0–100 = gewichtetes geometrisches Mittel der Kriterien (multiplikativ: ein sehr schwacher Wert zieht stark nach unten). K.-o.
+            (Nachfrage unter der Schwelle, Rechtsprüfung rot, Test außerhalb der Leitplanken) deckelt den Score auf {KO_SCORE_CAP}.
           </p>
           <div className="form-grid-3">
-            <Field label="Markt">
-              <NumberInput value={s.score_weight_market} onChange={(v) => set('score_weight_market', v ?? 0)} step={0.05} />
-            </Field>
-            <Field label="Technik">
-              <NumberInput value={s.score_weight_technical} onChange={(v) => set('score_weight_technical', v ?? 0)} step={0.05} />
-            </Field>
-            <Field label="Risiko">
-              <NumberInput value={s.score_weight_risk} onChange={(v) => set('score_weight_risk', v ?? 0)} step={0.05} />
+            {CRITERIA.map((c) => (
+              <Field key={c.key} label={c.label}>
+                <NumberInput
+                  value={s.criteria_weights[c.key as CriterionKey]}
+                  onChange={(v) => set('criteria_weights', { ...s.criteria_weights, [c.key]: v ?? 0 })}
+                  step={0.5}
+                  min={0}
+                />
+              </Field>
+            ))}
+            <Field label="K.-o., wenn Nachfrage unter">
+              <NumberInput value={s.ko_min_demand} onChange={(v) => set('ko_min_demand', v ?? 0)} step={0.5} min={0} />
             </Field>
           </div>
         </Card>

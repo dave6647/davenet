@@ -271,4 +271,25 @@ CREATE TABLE settings (
   value TEXT NOT NULL
 );
 `,
+  /* 2 – Bewertung nach 13 Kriterien, Rechtsprüfung, Nachfragetest, Einnahmen/Ausgaben/Owner-Zeit, Portfolio-Review */ `
+ALTER TABLE opportunities ADD COLUMN criteria TEXT;
+ALTER TABLE opportunities ADD COLUMN knockouts TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE opportunities ADD COLUMN legal TEXT;
+ALTER TABLE opportunities ADD COLUMN test TEXT;
+ALTER TABLE opportunities ADD COLUMN fixed_costs_eur_month REAL;
+ALTER TABLE opportunities ADD COLUMN portfolio_note TEXT;
+
+CREATE TABLE finance_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  opportunity_id TEXT REFERENCES opportunities(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  amount_eur REAL,
+  hours REAL,
+  date TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX finance_opportunity ON finance_entries(opportunity_id, date);
+CREATE INDEX finance_date ON finance_entries(date);
+`,
 ];

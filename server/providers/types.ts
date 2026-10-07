@@ -97,6 +97,38 @@ export interface ProviderAdapter {
   healthCheck(): Promise<{ ok: boolean; message: string }>;
 }
 
+export const IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536'] as const;
+export type ImageSize = (typeof IMAGE_SIZES)[number];
+export const IMAGE_QUALITIES = ['low', 'medium', 'high'] as const;
+export type ImageQuality = (typeof IMAGE_QUALITIES)[number];
+
+export interface ImageCallRequest {
+  /** Modellname beim Provider (z. B. gpt-image-2). */
+  model: string;
+  prompt: string;
+  size: ImageSize;
+  quality: ImageQuality;
+  transparent: boolean;
+  timeoutMs: number;
+  signal: AbortSignal;
+  log: (msg: string, level?: 'info' | 'warn' | 'error') => void;
+}
+
+export interface ImageCallResult {
+  /** PNG-Datei. */
+  image: Buffer;
+  revisedPrompt: string | null;
+  usage: CallUsage;
+  /** Tatsächlich genutztes Modell. */
+  model: string;
+}
+
+/** Bild-Provider (z. B. ChatGPT-Abo über die Codex CLI, OpenAI-Bild-API). */
+export interface ImageAdapter {
+  generate(req: ImageCallRequest): Promise<ImageCallResult>;
+  healthCheck(): Promise<{ ok: boolean; message: string }>;
+}
+
 export interface AdapterContext {
   secrets: SecretStore;
   dataDir: string;
@@ -104,5 +136,18 @@ export interface AdapterContext {
 
 export interface ProviderTypeDef {
   info: ProviderTypeInfo;
+  /** Sprachmodell-Adapter; Bild-Provider liefern hier nur die Verbindungsprüfung. */
   create(provider: Provider, ctx: AdapterContext): ProviderAdapter;
+  /** Nur für Provider der Art 'image'. */
+  createImage?(provider: Provider, ctx: AdapterContext): ImageAdapter;
+}
+
+/** Sprachmodell-Hülle für Bild-Provider: Verbindungsprüfung ja, Textaufrufe nein. */
+export function imageOnlyAdapter(image: ImageAdapter, label: string): ProviderAdapter {
+  return {
+    healthCheck: () => image.healthCheck(),
+    call: async () => {
+      throw new ProviderError('config', `${label} erzeugt nur Bilder und kann keine Text-Jobs ausführen`);
+    },
+  };
 }

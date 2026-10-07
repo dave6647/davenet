@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { APPROVAL_TYPE_LABELS, type Approval } from '../../../shared/domain.ts';
+import { APPROVAL_TYPE_LABELS, type Approval, type GuardrailStatus } from '../../../shared/domain.ts';
 import { api } from '../api.ts';
 import { ApprovalStatusBadge, Badge, Card, Empty, ErrorBox, Field, Loading, Markdown, PageHead, Tabs, TextArea, useAction } from '../components/ui.tsx';
 import { fmtDateTime, fmtRelative } from '../format.ts';
@@ -9,14 +9,24 @@ export function Approvals() {
   const [tab, setTab] = useState<'open' | 'done'>('open');
   const pending = useApi<Approval[]>('/api/approvals?status=PENDING', ['approval']);
   const all = useApi<Approval[]>(tab === 'done' ? '/api/approvals?limit=300' : null, ['approval']);
+  const guard = useApi<GuardrailStatus>('/api/guardrails', ['opportunity', 'approval', 'settings']);
   if (pending.error) return <ErrorBox error={pending.error} />;
+  const starts = (pending.data ?? []).filter((a) => a.type === 'TEST_START' || a.type === 'PROJECT_START').length;
+  const full = guard.data && guard.data.parallel.used >= guard.data.parallel.max;
 
   return (
     <>
       <PageHead
         title="Freigaben"
-        subtitle="Autonomie endet an definierten Approval Gates (Konzept §14): Projektstart, Release und Provider-Wechsel entscheidest du."
+        subtitle="Autonomie endet an definierten Approval Gates: Nachfragetest, Projektstart, Beenden, Release und Provider-Wechsel entscheidest du."
       />
+      {guard.data && starts > 0 && (
+        <div className={`alert ${full ? 'warn' : 'info'}`}>
+          {full
+            ? `Alle Plätze für Tests/Projekte sind belegt (${guard.data.parallel.used}/${guard.data.parallel.max}: ${guard.data.parallel.ids.join(', ')}). Test- und Projektfreigaben gehen erst, wenn etwas endet – oder du die Grenze in den Einstellungen erhöhst.`
+            : `Plätze für Tests/Projekte: ${guard.data.parallel.used} von ${guard.data.parallel.max} belegt.`}
+        </div>
+      )}
       <Tabs
         value={tab}
         onChange={setTab}
@@ -107,9 +117,10 @@ function ApprovalCard({ a }: { a: Approval }) {
           </a>
         )}
         {a.job_id && <a href={`#/jobs/${a.job_id}`}>Job #{a.job_id} öffnen →</a>}
-        {a.type === 'PROJECT_START' && payload.score != null && (
+        {(a.type === 'PROJECT_START' || a.type === 'TEST_START') && payload.score != null && (
           <span className="muted">
-            Score {String(payload.score)} · Markt {String(payload.market_score)} · Technik {String(payload.technical_score)} · Risiko {String(payload.risk_score)}
+            Score {String(payload.score)}
+            {payload.market_score != null && ` · Markt ${String(payload.market_score)} · Technik ${String(payload.technical_score)} · Risiko ${String(payload.risk_score)}`}
           </span>
         )}
       </div>
@@ -117,7 +128,16 @@ function ApprovalCard({ a }: { a: Approval }) {
         <Markdown text={a.summary || '–'} />
       </div>
       <div className="grid" style={{ marginTop: 12 }}>
-        <Field label="Notiz / Vorgaben (optional)" help={a.type === 'PROJECT_START' ? 'Bei Freigabe gehen deine Vorgaben direkt an die technische Planung.' : undefined}>
+        <Field
+          label="Notiz / Vorgaben (optional)"
+          help={
+            a.type === 'PROJECT_START'
+              ? 'Bei Freigabe gehen deine Vorgaben direkt an die technische Planung.'
+              : a.type === 'TEST_START'
+                ? 'Bei Freigabe gehen deine Vorgaben an die Testvorbereitung.'
+                : undefined
+          }
+        >
           <TextArea value={note} onChange={setNote} rows={2} />
         </Field>
         <div className="btn-row">

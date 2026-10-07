@@ -1,6 +1,7 @@
 import fs from 'node:fs';
-import type { FastifyInstance } from 'fastify';
-import { JOB_STATUSES, OPPORTUNITY_STATUSES, type JobStatus, type OpportunityStatus, type StrategyStatus } from '../../shared/domain.ts';
+import path from 'node:path';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { JOB_STATUSES, OPPORTUNITY_STATUSES, PRE_DECISION_STATUSES, type JobStatus, type OpportunityStatus, type StrategyStatus } from '../../shared/domain.ts';
 import type { App } from '../app.ts';
 import { jobType, jobTypeInfos } from '../engine/jobtypes/index.ts';
 import { MEMORY_AREAS, OWNER_EDITABLE_AREAS } from '../engine/memory.ts';
@@ -26,6 +27,21 @@ const int = (v: string | undefined, def: number, max = 1000): number => {
 };
 
 type OverviewAlert = { level: 'info' | 'warn' | 'error'; text: string; link?: string };
+
+const IMAGE_TYPES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+
+/** Liefert eine Bilddatei aus (nur Rasterformate – SVG bleibt Text, damit kein Skript im Kontext der Oberfläche läuft). */
+function sendImage(reply: FastifyReply, file: string, rel: string) {
+  const type = IMAGE_TYPES[path.extname(file).toLowerCase()];
+  if (!type) throw new ValidationError('Nur PNG, JPEG, WebP oder GIF');
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new NotFoundError(`Datei ${rel}`);
+  return reply
+    .type(type)
+    .header('Cache-Control', 'no-cache')
+    .header('X-Content-Type-Options', 'nosniff')
+    .header('Content-Security-Policy', "default-src 'none'")
+    .send(fs.readFileSync(file));
+}
 
 /** Hinweise zur Unternehmensstrategie: Vorlage, Kürzung durch das Kontextlimit, veraltete Kurzfassung. */
 function strategyAlerts(s: StrategyStatus): OverviewAlert[] {
@@ -85,6 +101,7 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
     if (budget.exceeded) alerts.push({ level: 'error', text: `Systembudget ausgeschöpft ($${budget.spent.toFixed(2)} / $${budget.limit})`, link: '#/finance' });
     else if (budget.warning) alerts.push({ level: 'warn', text: `Budget-Schwelle erreicht (${budget.pct?.toFixed(0)} %) – nur noch Jobs mit hoher Priorität auf kostenpflichtigen Providern`, link: '#/finance' });
     alerts.push(...strategyAlerts(app.memory.strategyStatus(orch.settings.strategy_context_chars)));
+    alerts.push(...orch.businessAlerts(now));
     if (orch.settings.engine_paused) alerts.push({ level: 'warn', text: 'Die Engine ist pausiert – es starten keine neuen Jobs' });
     return {
       company_name: orch.settings.company_name,
@@ -329,7 +346,7 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
     if (body.agent_id) store.agents.require(body.agent_id);
     if (body.type === 'deep_research' && body.opportunity_id) {
       const o = store.opportunities.require(body.opportunity_id);
-      if (!['REJECTED', 'DEPLOYED'].includes(o.status)) orch.setOpportunityStatus(o.id, 'RESEARCH', 'manueller Auftrag');
+      if (PRE_DECISION_STATUSES.includes(o.status)) orch.setOpportunityStatus(o.id, 'RESEARCH', 'manueller Auftrag');
     }
     return orch.createJob({ ...body, created_by: 'owner' });
   });
@@ -366,6 +383,13 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
       usage: store.ledger.list({ opportunity_id: id, limit: 1 }).total ? store.ledger.grouped('opportunity_id').find((r) => r.key === id) ?? null : null,
       workspace: { dir: app.memory.workspaceDir(id), files: orch.workspaceFiles(id) },
     };
+  });
+  http.get('/api/opportunities/:id/workspace/raw', async (req, reply) => {
+    const { id } = req.params as Params;
+    store.opportunities.require(id);
+    const rel = String((req.query as Query).path ?? '');
+    const ws = new Workspace(app.memory.workspaceDir(id), false);
+    return sendImage(reply, ws.resolve(rel), rel);
   });
   http.get('/api/opportunities/:id/workspace', async (req) => {
     const { id } = req.params as Params;
@@ -530,13 +554,43 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
   http.get('/api/settings', async () => orch.settings);
   http.put('/api/settings', async (req) => {
     const body = S.SettingsUpdate.parse(req.body);
-    const s = store.settings.update(body);
+    const { criteria_weights, ...rest } = body;
+    // Gewichte einzeln änderbar: mit den aktuellen Werten zusammenführen
+    const s = store.settings.update({
+      ...rest,
+      ...(criteria_weights ? { criteria_weights: { ...orch.settings.criteria_weights, ...(criteria_weights as Record<string, number>) } } : {}),
+    });
     orch.audit('owner', 'settings.updated', 'settings', null, 0, { ...body });
     orch.changed('settings');
     store.jobs.unblock();
     app.bus.emit('scheduler.wake');
     return s;
   });
+
+  // ---------------------------------------------------------------- Einnahmen, Ausgaben, Owner-Zeit, Portfolio
+
+  http.get('/api/finance/entries', async (req) => {
+    const q = req.query as Query;
+    return store.finance.list({ opportunity_id: q.opportunity_id || undefined, limit: int(q.limit, 200, 2000) });
+  });
+  http.post('/api/finance/entries', async (req) => orch.addFinanceEntry(S.FinanceCreate.parse(req.body)));
+  http.delete('/api/finance/entries/:id', async (req) => {
+    orch.deleteFinanceEntry(Number((req.params as Params).id));
+    return { ok: true };
+  });
+  http.get('/api/portfolio', async () => {
+    const now = new Date();
+    const monthFrom = monthStart(now);
+    const day = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return {
+      items: orch.portfolioItems(now),
+      guardrails: orch.guardrails(now),
+      month: store.finance.totals({ from: day(monthFrom) }),
+      total: store.finance.totals(),
+      last_review: store.artifacts.list({ kind: 'portfolio_review', limit: 1 })[0] ?? null,
+    };
+  });
+  http.get('/api/guardrails', async () => orch.guardrails());
 
   // ---------------------------------------------------------------- Unternehmensgedächtnis
 
@@ -546,6 +600,10 @@ export function registerRoutes(http: FastifyInstance, app: App, version: string)
     files: app.memory.tree(),
     strategy: app.memory.strategyStatus(orch.settings.strategy_context_chars),
   }));
+  http.get('/api/memory/raw', async (req, reply) => {
+    const rel = String((req.query as Query).path ?? '');
+    return sendImage(reply, app.memory.resolve(rel), rel);
+  });
   http.get('/api/memory/file', async (req) => {
     const p = String((req.query as Query).path ?? '');
     const file = app.memory.resolve(p);

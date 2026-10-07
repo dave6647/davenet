@@ -20,6 +20,9 @@ export function knowledgeSection(orch: Orchestrator, priority = 3): ContextSecti
 }
 
 export function opportunityJson(o: Opportunity): string {
+  const criteria = o.criteria
+    ? Object.fromEntries(Object.entries(o.criteria).map(([k, v]) => [k, typeof v === 'number' ? v : v?.score]))
+    : null;
   return compactJson({
     id: o.id,
     title: o.title,
@@ -31,6 +34,10 @@ export function opportunityJson(o: Opportunity): string {
     market_score: o.market_score,
     technical_score: o.technical_score,
     risk_score: o.risk_score,
+    criteria,
+    knockouts: o.knockouts,
+    legal: o.legal ? { status: o.legal.status, how_possible: o.legal.how_possible, steps: o.legal.steps.map((s) => s.step).slice(0, 10) } : null,
+    test: o.test ? { status: o.test.status, attempt: o.test.attempt, plan: o.test.plan, result: o.test.result?.notes, verdict: o.test.evaluation?.verdict } : null,
     confidence: o.confidence,
     score: o.score,
     status: o.status,

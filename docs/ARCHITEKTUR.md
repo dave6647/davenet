@@ -38,8 +38,9 @@ Agents laufen nie dauerhaft – jeder Job ist genau ein (ggf. mehrstufiger) Mode
 | `job_routes` | Zuständigkeit Job-Typ → Agent (+ optionale Capability-Überschreibung, aktiv/inaktiv) |
 | `providers`, `models` | Anbieter mit Abrechnungsart, Kontingent, Kostenlimit, Laufzeitzustand; Modelle je Capability-Klasse mit Preisen |
 | `jobs` | Queue inkl. Status, Priorität, Versuchen, Wartegrund, frühestem Start, Verbrauch, Protokoll |
-| `opportunities`, `tasks` | Pipeline-Objekte (Konzept §9) und Projekt-Tasks |
-| `approvals` | Freigaben (Projektstart, Release, Provider-Wechsel) |
+| `opportunities`, `tasks` | Pipeline-Objekte (Konzept §9) inkl. 13 Kriterien, K.-o., Rechtsprüfung, Nachfragetest, Fixkosten, Portfolio-Empfehlung; Projekt-Tasks |
+| `approvals` | Freigaben (Nachfragetest, Projektstart, Beenden, Release, Provider-Wechsel) |
+| `finance_entries` | Einnahmen, Ausgaben (€) und Owner-Zeit (Std.) je Produkt oder allgemein |
 | `artifacts` | Metadaten der Artefakte; Inhalt liegt als Datei im Gedächtnis |
 | `usage_events` | Ledger: ein Eintrag pro Modellaufruf (Konzept §12) |
 | `audit_log` | Wer hat wann was getan, mit Approval-Level |
@@ -113,12 +114,16 @@ kumuliert); `apiKeySource: none` kennzeichnet eine Abo-Anmeldung ohne Kosten pro
 | Owner-Auftrag | Executive Orchestrator | – | zerlegt Freitext in ≤ 5 Jobs (Scan, Recherche, freie Aufträge) |
 | Executive Briefing | Executive Orchestrator | – | Lagebericht in `/decisions` |
 | Opportunity-Scan | Opportunity Scout | Websuche, Webseiten | neue Opportunities (Duplikate werden verworfen) → Screening |
-| Screening | Opportunity Scout (LOW) | – | Vorbewertung; Score ≥ Schwelle → Deep Research, sonst verworfen |
-| Deep Research | Research Analyst | Websuche, Webseiten | Recherchebericht, aktualisiertes Artefakt → Bewertung |
-| Bewertung | Research Analyst | – | Scores + Empfehlung; GO & Score ≥ Schwelle → Freigabe Projektstart |
+| Screening | Opportunity Scout (LOW) | – | 13 Kriterien (vorläufig) + rechtliche K.-o.-Punkte; Score ≥ Schwelle ohne K.-o. → Deep Research, sonst verworfen |
+| Deep Research | Research Analyst | Websuche, Webseiten | Recherchebericht inkl. Rechtsprüfung (ob/wie möglich, Aufwand, Schritte, Ampel) → Bewertung |
+| Bewertung | Research Analyst | – | 13 Kriterien mit Begründung + Testplan; GO, Score ≥ Schwelle, kein K.-o. → Freigabe Nachfragetest (oder Projektstart, wenn der Test abgeschaltet ist) |
+| Nachfragetest vorbereiten | Implementation | Workspace lesen/schreiben | Testpaket unter `test/` + Checkliste für den Owner, ggf. Bildanfragen |
+| Nachfragetest auswerten | Research Analyst | – | bauen → Freigabe Projektstart; anpassen → Versuch 2 (höchstens einmal); beenden → Freigabe „Beenden“ |
 | Technische Planung | Technical Planner | – | MVP-Spezifikation + Tasks → Umsetzung (optional automatisch) |
-| Implementierung | Implementation | Workspace lesen/schreiben | Dateien im Workspace, Git-Commit → Review |
+| Implementierung | Implementation | Workspace lesen/schreiben | Dateien im Workspace, Git-Commit → Review; Bildanfragen → Bild-Jobs |
 | Review | Review | Workspace lesen | PASS → erledigt; REWORK → Nacharbeit (max. Runden) → Eskalation |
+| Portfolio-Review | Executive Orchestrator | – | monatlich; je Test/Produkt Empfehlung, „beenden“ → Freigabe; Bericht in `/decisions` |
+| Bild erzeugen | Designer | – (Bild-Provider) | PNG in `/media` und – mit Opportunity – im Workspace unter `assets/` |
 | Kostenbericht | Cost Controller | – | Bericht in `/finance` (rechnet nur mit gelieferten Ledger-Zahlen) |
 | Audit-Prüfung | Auditor | – | Bericht in `/audit` |
 | Freier Auftrag | beliebig | je nach Agent | Ergebnis in `/knowledge` bzw. `/research` |
@@ -127,8 +132,26 @@ Alle Ergebnisse werden als JSON-Schema-geprüfte Struktur geliefert (native stru
 der CLI bzw. API, sonst Extraktion + ein Reparaturversuch). Ungültige Rohausgaben werden zur
 Nachvollziehbarkeit gespeichert.
 
-**Gesamt-Score:** gewichteter Mittelwert aus Markt, Technik und (10 − Risiko), skaliert auf 0–100;
-Gewichte und Schwellen unter *Einstellungen*.
+**Gesamt-Score:** gewichtetes geometrisches Mittel der 13 Kriterien (je 0–10, 10 = am besten),
+skaliert auf 0–100 – multiplikativ, damit ein sehr schwacher Wert nicht durch gute Werte
+ausgeglichen wird. **K.-o.-Kriterien** (Nachfrage unter der Schwelle, Rechtsprüfung rot, Testplan
+außerhalb der Leitplanken) deckeln den Score auf 30 und damit unter die Schwellen für Recherche
+und Vorschlag. Gewichte, Schwellen und Leitplanken unter *Einstellungen*; ältere Opportunities
+behalten ihr Schema (Markt/Technik/Risiko).
+
+**Nachfragetest & Leitplanken:** Der Testplan (Hypothese, Kanal, Budget, Owner-Zeit, Laufzeit,
+Messgröße, Erfolgskriterium) entsteht bei der Bewertung. Test- und Projektfreigaben sind nur
+möglich, solange weniger als `guard_max_parallel` Opportunities im Test oder in Umsetzung sind
+(Status `TESTING`, `APPROVED` … `READY`; veröffentlichte Produkte zählen nicht). Einnahmen,
+Ausgaben und Owner-Zeit liegen in `finance_entries`; daraus entstehen Portfolio-Kennzahlen,
+die Hinweise in der Übersicht (Owner-Zeit/Woche, Fixkosten, abgelaufene Tests) und die Daten für
+den Portfolio-Review – das Modell rechnet nicht selbst.
+
+**Bilder:** Bild-Jobs (`providerKind: 'image'`) laufen ohne Sprachmodell direkt beim Bild-Provider;
+der Router wählt nur Provider der passenden Art (Sprachmodell-Jobs nie bei Bild-Providern). Die
+Codex CLI wird mit `exec --json --sandbox read-only --ignore-user-config` gestartet; das erzeugte
+PNG liegt unter `$CODEX_HOME/generated_images/<thread>/` und wird übernommen, Limit-Meldungen
+werden zu `quota` mit Reset-Zeit.
 
 ## Kontextstrategie (Konzept §11)
 
@@ -175,7 +198,7 @@ kennen, werden erkannt (die Option wird dann weggelassen und im Job-Protokoll ve
 
 | Offener Punkt | Entscheidung für v0.1 |
 | --- | --- |
-| Welche Provider zuerst? | Claude-Abo über Claude Code CLI (Standard), Anthropic API (optional), Simulation (Test) |
+| Welche Provider zuerst? | Claude-Abo über Claude Code CLI (Standard), Anthropic API (optional), Simulation (Test); für Bilder ChatGPT-Abo über Codex CLI, OpenAI-Bild-API, Bild-Simulation |
 | Wie melden Provider ihr Restkontingent? | Claude-CLI: `rate_limit_event` (Auslastung + Reset der Plan-Fenster) und Limit-Meldungen; API: Kostenlimit über das eigene Ledger; sonst konfigurierbare Zähler (Tokens/Requests/USD) oder manuell |
 | Welche Jobs dürfen ausweichen? | pro Agent und pro Job über die Policy; Standard überall `WAIT` |
 | Prioritätsklassen / Wartezeiten | Prioritäten niedrig/normal/hoch/kritisch; Warten bis Reset (bekannt oder geschätzt); Budget-Warnschwelle lässt nur hoch/kritisch auf kostenpflichtigen Providern laufen |

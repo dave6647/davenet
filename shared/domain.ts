@@ -95,11 +95,13 @@ export const OPPORTUNITY_STATUSES = [
   'RESEARCH',
   'EVALUATION',
   'PROPOSED',
+  'TESTING',
   'APPROVED',
   'DEVELOPMENT',
   'REVIEW',
   'READY',
   'DEPLOYED',
+  'STOPPED',
   'REJECTED',
   'ON_HOLD',
 ] as const;
@@ -110,14 +112,184 @@ export const OPPORTUNITY_STATUS_LABELS: Record<OpportunityStatus, string> = {
   RESEARCH: 'Research',
   EVALUATION: 'Bewertung',
   PROPOSED: 'vorgeschlagen (Freigabe offen)',
+  TESTING: 'Nachfragetest',
   APPROVED: 'freigegeben',
   DEVELOPMENT: 'Entwicklung',
   REVIEW: 'Review / Test',
   READY: 'bereit (Release-Freigabe offen)',
   DEPLOYED: 'veröffentlicht',
+  STOPPED: 'beendet',
   REJECTED: 'verworfen',
   ON_HOLD: 'zurückgestellt',
 };
+
+/** Status vor einer Entscheidung über Test oder Bau – nur hier dürfen Recherche und Bewertung den Status ändern. */
+export const PRE_DECISION_STATUSES: OpportunityStatus[] = ['DISCOVERED', 'SCREENING', 'RESEARCH', 'EVALUATION', 'PROPOSED', 'ON_HOLD'];
+/** Status, die einen der begrenzten Plätze für Tests und Projekte belegen (Leitplanke "höchstens N gleichzeitig"). */
+export const SLOT_STATUSES: OpportunityStatus[] = ['TESTING', 'APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY'];
+/** Status, in denen eine Opportunity zum Portfolio gehört (Test, Umsetzung, Betrieb). */
+export const PORTFOLIO_STATUSES: OpportunityStatus[] = ['TESTING', 'APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY', 'DEPLOYED'];
+
+// ---------------------------------------------------------------- Bewertung nach 13 Kriterien (Strategie §15/§16)
+/**
+ * Alle Kriterien werden von 0 bis 10 bewertet, 10 ist immer am besten – auch bei Aufwand, Konkurrenz und Risiko
+ * (10 = sehr wenig Aufwand, gut positionierbar, kaum Risiko). Gewichte sind in den Einstellungen änderbar.
+ */
+export const CRITERIA = [
+  { key: 'demand', label: 'Nachfrage', question: 'Gibt es erkennbare und möglichst nachweisbare Nachfrage?', weight: 3 },
+  { key: 'test_cost', label: 'Investitionsbedarf', question: 'Wie günstig lässt sich die Idee testen? (10 = fast kostenlos)', weight: 2 },
+  { key: 'time_to_revenue', label: 'Time-to-Revenue', question: 'Wie schnell ist der erste zahlende Kunde erreichbar?', weight: 1.5 },
+  { key: 'automation', label: 'Automatisierbarkeit', question: 'Wie viel des Geschäfts erledigen Software und Agents?', weight: 2 },
+  { key: 'ongoing_effort', label: 'Laufender Aufwand', question: 'Wie wenig menschliche Arbeit bleibt nach der Einrichtung? (10 = fast keine)', weight: 1.5 },
+  { key: 'margin', label: 'Marge', question: 'Wie gering ist der variable Aufwand pro zusätzlichem Verkauf?', weight: 1.5 },
+  { key: 'feasibility', label: 'Technische Machbarkeit', question: 'Kann Davenet das Produkt mit verfügbaren Mitteln zuverlässig umsetzen?', weight: 2 },
+  { key: 'competition', label: 'Konkurrenz', question: 'Wie gut lässt sich das Angebot gegenüber bestehenden positionieren? (10 = sehr gut)', weight: 1 },
+  { key: 'scalability', label: 'Skalierbarkeit', question: 'Kann das Angebot ohne proportional steigenden Aufwand wachsen?', weight: 1 },
+  { key: 'platform_risk', label: 'Plattformrisiko', question: 'Wie unabhängig ist das Modell von einem einzelnen Anbieter? (10 = unabhängig)', weight: 1 },
+  { key: 'support', label: 'Supportaufwand', question: 'Wie wenig Betreuung ist voraussichtlich nötig? (10 = kaum)', weight: 1 },
+  { key: 'repeatability', label: 'Wiederholbarkeit', question: 'Lässt sich ein Erfolg auf weitere Nischen, Produkte oder Märkte übertragen?', weight: 1 },
+  { key: 'legal', label: 'Rechtlicher Aufwand', question: 'Wie wenig rechtlicher Aufwand und Risiko entsteht? (10 = kaum)', weight: 1.5 },
+] as const;
+export type CriterionKey = (typeof CRITERIA)[number]['key'];
+export const CRITERION_KEYS = CRITERIA.map((c) => c.key) as CriterionKey[];
+export const DEFAULT_CRITERIA_WEIGHTS = Object.fromEntries(CRITERIA.map((c) => [c.key, c.weight])) as Record<CriterionKey, number>;
+/** Ein K.-o.-Kriterium deckelt den Gesamt-Score – unter den Schwellen für Recherche und Vorschlag. */
+export const KO_SCORE_CAP = 30;
+export type CriteriaScores = Partial<Record<CriterionKey, { score: number; note: string }>>;
+
+// ---------------------------------------------------------------- Rechtliche & Plattform-Prüfung (Strategie §13)
+export const LEGAL_STATUSES = ['green', 'yellow', 'red'] as const;
+export type LegalStatus = (typeof LEGAL_STATUSES)[number];
+export const LEGAL_STATUS_LABELS: Record<LegalStatus, string> = {
+  green: 'grün – keine besonderen Schritte',
+  yellow: 'gelb – machbar mit Schritten',
+  red: 'rot – nicht oder nur mit hohem Risiko machbar',
+};
+
+export interface LegalCheck {
+  status: LegalStatus;
+  /** Ob und wie das Vorhaben rechtlich und nach Plattformregeln umsetzbar ist. */
+  how_possible: string;
+  effort_one_time_hours: number | null;
+  effort_one_time_eur: number | null;
+  effort_ongoing_hours_month: number | null;
+  effort_ongoing_eur_month: number | null;
+  steps: { step: string; details: string }[];
+  open_questions: string[];
+  source: 'screening' | 'research';
+  checked_at: string;
+}
+
+// ---------------------------------------------------------------- Nachfragetest vor dem Bau (Strategie §8)
+export interface TestPlan {
+  hypothesis: string;
+  channel: string;
+  budget_eur: number;
+  owner_hours: number;
+  duration_days: number;
+  metric: string;
+  success_criterion: string;
+  /** Was der Owner selbst tun muss (z. B. Listing veröffentlichen). */
+  owner_steps: string[];
+  /** Was Davenet vorbereitet (Texte, Landingpage, Designs). */
+  materials: string[];
+}
+
+export const TEST_STATUSES = ['PROPOSED', 'PREPARING', 'READY', 'RUNNING', 'EVALUATING', 'PASSED', 'FAILED'] as const;
+export type TestStatus = (typeof TEST_STATUSES)[number];
+export const TEST_STATUS_LABELS: Record<TestStatus, string> = {
+  PROPOSED: 'vorgeschlagen',
+  PREPARING: 'wird vorbereitet',
+  READY: 'Testpaket bereit – deine Schritte',
+  RUNNING: 'läuft',
+  EVALUATING: 'wird ausgewertet',
+  PASSED: 'bestanden',
+  FAILED: 'nicht bestanden',
+};
+export const TEST_VERDICTS = ['BUILD', 'ADJUST', 'STOP'] as const;
+export type TestVerdict = (typeof TEST_VERDICTS)[number];
+export const TEST_VERDICT_LABELS: Record<TestVerdict, string> = { BUILD: 'bauen', ADJUST: 'anpassen und erneut testen', STOP: 'beenden' };
+
+export interface TestRound {
+  attempt: number;
+  plan: TestPlan;
+  started_at: string | null;
+  ends_at: string | null;
+  result: { notes: string; recorded_at: string } | null;
+  evaluation: { verdict: TestVerdict; success_criterion_met: boolean; summary: string; recorded_at: string } | null;
+}
+
+export interface TestState extends TestRound {
+  status: TestStatus;
+  /** Verstöße gegen die Leitplanken (Testbudget, Owner-Zeit), festgestellt beim Vorschlag. */
+  guardrail_issues: string[];
+  history: TestRound[];
+}
+
+export const PORTFOLIO_RECOMMENDATIONS = ['keep', 'expand', 'adjust', 'stop'] as const;
+export type PortfolioRecommendation = (typeof PORTFOLIO_RECOMMENDATIONS)[number];
+export const PORTFOLIO_RECOMMENDATION_LABELS: Record<PortfolioRecommendation, string> = {
+  keep: 'behalten',
+  expand: 'ausbauen',
+  adjust: 'anpassen',
+  stop: 'beenden',
+};
+
+export interface PortfolioNote {
+  recommendation: PortfolioRecommendation;
+  reason: string;
+  forecast: string;
+  job_id: number;
+  at: string;
+}
+
+// ---------------------------------------------------------------- Einnahmen, Ausgaben, Owner-Zeit
+export const FINANCE_KINDS = ['revenue', 'expense', 'time'] as const;
+export type FinanceKind = (typeof FINANCE_KINDS)[number];
+export const FINANCE_KIND_LABELS: Record<FinanceKind, string> = { revenue: 'Einnahme', expense: 'Ausgabe', time: 'Owner-Zeit' };
+
+export interface FinanceEntry {
+  id: number;
+  opportunity_id: string | null;
+  kind: FinanceKind;
+  amount_eur: number | null;
+  hours: number | null;
+  /** Datum der Buchung (YYYY-MM-DD). */
+  date: string;
+  note: string;
+  created_at: string;
+}
+
+export interface FinanceTotals {
+  revenue_eur: number;
+  expense_eur: number;
+  hours: number;
+  entries: number;
+}
+
+export interface GuardrailStatus {
+  parallel: { used: number; max: number; ids: string[] };
+  owner_hours_week: { used: number; max: number; week_start: string };
+  test_budget_eur: number;
+  test_owner_hours: number;
+  fixed_costs_eur_month: number;
+}
+
+export interface PortfolioItem {
+  id: string;
+  title: string;
+  status: OpportunityStatus;
+  score: number | null;
+  test_status: TestStatus | null;
+  test_ends_at: string | null;
+  fixed_costs_eur_month: number | null;
+  total: FinanceTotals;
+  month: FinanceTotals;
+  last30: FinanceTotals;
+  ai_cost_usd: number;
+  ai_equivalent_usd: number;
+  portfolio_note: PortfolioNote | null;
+}
 
 export const TASK_STATUSES = ['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'REWORK', 'DONE', 'BLOCKED'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -131,10 +303,12 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
 };
 
 // ---------------------------------------------------------------- Freigaben (Konzept §14)
-export const APPROVAL_TYPES = ['PROJECT_START', 'RELEASE', 'PROVIDER_SWITCH'] as const;
+export const APPROVAL_TYPES = ['TEST_START', 'PROJECT_START', 'PROJECT_STOP', 'RELEASE', 'PROVIDER_SWITCH'] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 export const APPROVAL_TYPE_LABELS: Record<ApprovalType, string> = {
+  TEST_START: 'Nachfragetest',
   PROJECT_START: 'Projektstart',
+  PROJECT_STOP: 'Beenden',
   RELEASE: 'Release / Veröffentlichung',
   PROVIDER_SWITCH: 'Provider-Wechsel',
 };
@@ -150,7 +324,7 @@ export const APPROVAL_STATUS_LABELS: Record<ApprovalStatus, string> = {
 export const APPROVAL_LEVELS = [
   { level: 0, label: 'Autonom', examples: 'Recherche, Analyse, interne Reports, Tests' },
   { level: 1, label: 'Autonom + Audit Log', examples: 'Code im Projekt-Workspace, interne Datenänderungen' },
-  { level: 2, label: 'Owner Approval', examples: 'Projektstart, Release/Deployment, Veröffentlichung, Provider-Wechsel' },
+  { level: 2, label: 'Owner Approval', examples: 'Nachfragetest, Projektstart, Beenden, Release/Deployment, Veröffentlichung, Provider-Wechsel' },
   { level: 3, label: 'Immer Owner', examples: 'Geldtransaktionen, Verträge, Accounts, Zugangsdaten – Agents haben dafür keine Werkzeuge' },
 ] as const;
 
@@ -344,9 +518,20 @@ export interface Opportunity {
   proposed_solution: string;
   competition_summary: string;
   revenue_model: string;
+  /** Altes Bewertungsschema (Markt/Technik/Risiko) – nur noch für frühere Opportunities. */
   market_score: number | null;
   technical_score: number | null;
   risk_score: number | null;
+  /** Bewertung nach den 13 Kriterien der Strategie. */
+  criteria: CriteriaScores | null;
+  /** Ausgelöste K.-o.-Kriterien (deckeln den Score). */
+  knockouts: string[];
+  legal: LegalCheck | null;
+  test: TestState | null;
+  /** Laufende Fixkosten des Produkts (vom Owner gepflegt). */
+  fixed_costs_eur_month: number | null;
+  /** Letzte Empfehlung aus dem Portfolio-Review. */
+  portfolio_note: PortfolioNote | null;
   confidence: number | null;
   score: number | null;
   sources: Source[];
@@ -401,7 +586,7 @@ export interface Artifact {
   kind: string;
   title: string;
   path: string;
-  format: 'md' | 'json';
+  format: 'md' | 'json' | 'png';
   size: number;
   summary: string;
   job_id: number | null;
@@ -491,6 +676,17 @@ export interface Settings {
   artifact_context_chars: number;
   strategy_context_chars: number;
   job_max_attempts: number;
+  /** Vor dem Bau zuerst einen Nachfragetest vorschlagen (Strategie §8). */
+  require_demand_test: boolean;
+  /** Leitplanken (Strategie §7). */
+  guard_test_budget_eur: number;
+  guard_test_owner_hours: number;
+  guard_fixed_costs_eur_month: number;
+  guard_max_parallel: number;
+  guard_owner_hours_week: number;
+  /** Nachfrage unter diesem Wert (0–10) ist ein K.-o.-Kriterium. */
+  ko_min_demand: number;
+  criteria_weights: Record<CriterionKey, number>;
 }
 
 /** Welche Fassung der Unternehmensstrategie die Agents als Kontext erhalten. */
@@ -517,11 +713,24 @@ export interface JobTypeInfo {
   requires_opportunity: boolean;
   requires_task: boolean;
   manual: boolean;
-  input_fields: { key: string; label: string; type: 'text' | 'textarea' | 'number'; required?: boolean }[];
+  /** 'image' = wird von einem Bild-Provider ausgeführt (ohne Sprachmodell). */
+  provider_kind: ProviderKind;
+  input_fields: {
+    key: string;
+    label: string;
+    type: 'text' | 'textarea' | 'number' | 'select' | 'checkbox';
+    required?: boolean;
+    options?: { value: string; label: string }[];
+  }[];
 }
+
+export const PROVIDER_KINDS = ['llm', 'image'] as const;
+export type ProviderKind = (typeof PROVIDER_KINDS)[number];
+export const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = { llm: 'Sprachmodell', image: 'Bilder' };
 
 export interface ProviderTypeInfo {
   type: string;
+  kind: ProviderKind;
   label: string;
   description: string;
   billing_mode_default: BillingMode;

@@ -1,4 +1,5 @@
-import { CAPABILITIES, capabilityRank, type Agent, type Capability, type Job, type Model, type Provider, type ProviderPolicy, type Settings } from '../../shared/domain.ts';
+import { CAPABILITIES, capabilityRank, type Agent, type Capability, type Job, type Model, type Provider, type ProviderKind, type ProviderPolicy, type Settings } from '../../shared/domain.ts';
+import { providerKind } from '../providers/registry.ts';
 import type { Store } from '../repo/store.ts';
 import { agentMonthSpend, computeQuota, systemBudget } from './quota.ts';
 
@@ -34,14 +35,16 @@ export interface RouteInput {
   settings: Settings;
   now: Date;
   runningByProvider: Record<string, number>;
+  /** Art des benötigten Providers (Sprachmodell oder Bilder); Standard: Sprachmodell. */
+  kind?: ProviderKind;
 }
 
 export class Router {
   constructor(private readonly store: Store) {}
 
   /** Alle Kandidaten in Präferenzreihenfolge (je Provider die passenden Modelle). */
-  candidates(agent: Agent): { provider: Provider; models: Model[] }[] {
-    const all = this.store.providers.list().filter((p) => p.enabled);
+  candidates(agent: Agent, kind: ProviderKind = 'llm'): { provider: Provider; models: Model[] }[] {
+    const all = this.store.providers.list().filter((p) => p.enabled && providerKind(p.type) === kind);
     const ordered = agent.allowed_providers.length
       ? agent.allowed_providers.map((id) => all.find((p) => p.id === id)).filter((p): p is Provider => !!p)
       : all; // bereits nach Priorität sortiert
@@ -55,12 +58,15 @@ export class Router {
 
   route(input: RouteInput): RouteDecision {
     const { job, agent, capability } = input;
-    const providers = this.candidates(agent);
+    const kind = input.kind ?? 'llm';
+    const providers = this.candidates(agent, kind);
+    // Bild-Provider haben oft nur ein Modell – passt keine Klasse, gilt das erste Modell
+    const pick = (models: Model[], tier: Capability) => models.find((x) => x.tier === tier) ?? (kind === 'image' ? models[0] : undefined);
 
     // Vom Owner (per Freigabe) festgelegter Provider/Modell hat Vorrang – ohne weiteren Fallback.
     if (job.forced_provider_id) {
       const entry = providers.find((c) => c.provider.id === job.forced_provider_id) ?? this.forcedEntry(job.forced_provider_id);
-      const model = entry?.models.find((m) => m.id === job.forced_model_id) ?? entry?.models.find((m) => m.tier === capability);
+      const model = entry?.models.find((m) => m.id === job.forced_model_id) ?? (entry ? pick(entry.models, capability) : undefined);
       if (!entry || !model) return { kind: 'block', providerId: job.forced_provider_id, reason: 'Freigegebener Provider/Modell ist nicht mehr verfügbar' };
       const c = { provider: entry.provider, model };
       const a = this.availability(c, input);
@@ -71,7 +77,7 @@ export class Router {
 
     const sameTier: Candidate[] = [];
     for (const { provider, models } of providers) {
-      const m = models.find((x) => x.tier === capability);
+      const m = pick(models, capability);
       if (m) sameTier.push({ provider, model: m });
     }
     const anyTier: Candidate[] = [...sameTier];
@@ -98,6 +104,13 @@ export class Router {
           kind: 'block',
           providerId: null,
           reason: `Kein verfügbarer Provider für Agent ${agent.id}`,
+        };
+      }
+      if (kind === 'image') {
+        return {
+          kind: 'block',
+          providerId: null,
+          reason: 'Kein aktiver Bild-Provider – unter Provider & Modelle das ChatGPT-Abo (Codex CLI) oder die OpenAI-Bild-API aktivieren',
         };
       }
       return {

@@ -49,7 +49,8 @@ export function Providers() {
   if (providers.error) return <ErrorBox error={providers.error} />;
   if (!providers.data || !models.data) return <Loading />;
   const typeLabel = (t: string) => meta.provider_types.find((x) => x.type === t)?.label ?? t;
-  const enabled = providers.data.filter((p) => p.enabled);
+  // Die Capability-Matrix betrifft nur Sprachmodelle – Bild-Provider werden ohne Klasse über den Designer genutzt
+  const enabled = (providers.data.filter((p) => p.enabled)).filter((p) => meta.provider_types.find((t) => t.type === p.type)?.kind !== 'image');
 
   const test = (id: string) =>
     run(async () => {
@@ -92,7 +93,8 @@ export function Providers() {
                   <td>
                     <strong>{p.name}</strong>
                     <div className="small muted">
-                      {typeLabel(p.type)} · <span className="mono">{p.id}</span>
+                      {meta.provider_types.find((x) => x.type === p.type)?.kind === 'image' && <Badge kind="accent">Bilder</Badge>} {typeLabel(p.type)} ·{' '}
+                      <span className="mono">{p.id}</span>
                     </div>
                   </td>
                   <td>{BILLING_MODE_LABELS[p.billing_mode]}</td>

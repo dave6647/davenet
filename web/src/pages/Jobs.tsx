@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { PRIORITIES, PROVIDER_POLICIES, PROVIDER_POLICY_LABELS, type Agent, type Job, type JobRoute, type JobStatus, type Opportunity, type Task } from '../../../shared/domain.ts';
 import { api, qs } from '../api.ts';
-import { Card, ErrorBox, Field, JobStatusBadge, Loading, Modal, PageHead, PriorityBadge, Select, TextArea, TextInput, NumberInput, useAction } from '../components/ui.tsx';
+import { Card, ErrorBox, Field, JobStatusBadge, Loading, Modal, PageHead, PriorityBadge, Select, TextArea, TextInput, NumberInput, useAction, Check } from '../components/ui.tsx';
 import { fmtRelative, fmtTokens, fmtUsd } from '../format.ts';
 import { useApi } from '../live.ts';
 import { useJobTypeLabel, useMeta } from '../meta.tsx';
@@ -230,6 +230,14 @@ export function NewJobDialog({ onClose, initialType, initialAgent, initialOpport
         <Field key={f.key} label={`${f.label}${f.required ? ' *' : ''}`}>
           {f.type === 'textarea' ? (
             <TextArea value={String(input[f.key] ?? '')} onChange={(v) => setInput({ ...input, [f.key]: v })} rows={5} />
+          ) : f.type === 'select' ? (
+            <Select
+              value={(input[f.key] as string | undefined) ?? f.options?.[0]?.value ?? null}
+              options={f.options ?? []}
+              onChange={(v) => setInput({ ...input, [f.key]: v })}
+            />
+          ) : f.type === 'checkbox' ? (
+            <Check checked={input[f.key] === true} onChange={(v) => setInput({ ...input, [f.key]: v })} label="ja" />
           ) : f.type === 'number' ? (
             <NumberInput value={input[f.key] == null ? null : Number(input[f.key])} onChange={(v) => setInput({ ...input, [f.key]: v })} />
           ) : (
@@ -237,7 +245,13 @@ export function NewJobDialog({ onClose, initialType, initialAgent, initialOpport
           )}
         </Field>
       ))}
-      {(def?.requires_opportunity || type === 'custom') && (
+      {def?.provider_kind === 'image' && (
+        <p className="small muted" style={{ margin: 0 }}>
+          Läuft über den aktiven Bild-Provider (z. B. dein ChatGPT-Abo über die Codex CLI). Mit Opportunity landet das Bild zusätzlich im Projekt-Workspace unter
+          assets/.
+        </p>
+      )}
+      {(def?.requires_opportunity || type === 'custom' || def?.provider_kind === 'image') && (
         <Field label={`Opportunity${def?.requires_opportunity ? ' *' : ' (optional)'}`}>
           <Select
             value={oppId}

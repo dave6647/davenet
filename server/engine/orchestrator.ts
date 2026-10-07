@@ -2,16 +2,40 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   APPROVAL_TYPE_LABELS,
+  CRITERIA,
+  CRITERION_KEYS,
+  FINANCE_KIND_LABELS,
+  LEGAL_STATUS_LABELS,
+  OPPORTUNITY_STATUS_LABELS,
+  PRE_DECISION_STATUSES,
+  PORTFOLIO_RECOMMENDATIONS,
+  PORTFOLIO_RECOMMENDATION_LABELS,
+  PORTFOLIO_STATUSES,
+  SLOT_STATUSES,
+  TEST_STATUS_LABELS,
+  TEST_VERDICT_LABELS,
   type Approval,
+  type CriteriaScores,
+  type FinanceEntry,
+  type FinanceKind,
+  type GuardrailStatus,
   type Job,
+  type LegalCheck,
   type Opportunity,
   type OpportunityStatus,
+  type PortfolioItem,
+  type PortfolioRecommendation,
   type ProviderPolicy,
   type ProviderView,
   type Task,
+  type TestPlan,
+  type TestState,
+  type TestVerdict,
 } from '../../shared/domain.ts';
 import type { EventBus } from '../events.ts';
-import { createAdapter } from '../providers/registry.ts';
+import { createAdapter, providerKind } from '../providers/registry.ts';
+import type { ImageCallResult } from '../providers/types.ts';
+import { emptyTotals } from '../repo/finance.ts';
 import type { Store } from '../repo/store.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../repo/util.ts';
 import type { SecretStore } from '../secrets.ts';
@@ -20,8 +44,47 @@ import { jobType } from './jobtypes/index.ts';
 import { clamp, normalizeTitle } from './jobtypes/common.ts';
 import type { CompletionInfo, JobContext } from './jobtypes/types.ts';
 import { CompanyMemory, type MemoryArea } from './memory.ts';
-import { computeQuota, systemBudget } from './quota.ts';
-import { computeScore } from './scoring.ts';
+import { computeQuota, monthStart, systemBudget } from './quota.ts';
+import { cappedScore, criteriaScore, criterionValue, guardrailIssues, knockouts } from './scoring.ts';
+import type { ImageRequest } from './jobtypes/schemas.ts';
+
+const localDay = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const eur = (v: number | null | undefined): string => `${(v ?? 0).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+const num = (v: unknown, fallback = 0): number => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+/** Testplan aus einer Modellantwort übernehmen (Zahlen bereinigen, Listen begrenzen). */
+function cleanPlan(p: TestPlan): TestPlan {
+  return {
+    hypothesis: String(p.hypothesis ?? '').trim(),
+    channel: String(p.channel ?? '').trim(),
+    budget_eur: Math.max(0, num(p.budget_eur)),
+    owner_hours: Math.max(0, num(p.owner_hours)),
+    duration_days: Math.min(180, Math.max(1, Math.round(num(p.duration_days, 30)))),
+    metric: String(p.metric ?? '').trim(),
+    success_criterion: String(p.success_criterion ?? '').trim(),
+    owner_steps: (p.owner_steps ?? []).map(String).filter(Boolean).slice(0, 15),
+    materials: (p.materials ?? []).map(String).filter(Boolean).slice(0, 15),
+  };
+}
+
+function planMarkdown(p: TestPlan): string[] {
+  return [
+    '| Testplan | |',
+    '|---|---|',
+    `| Hypothese | ${p.hypothesis.replace(/\|/g, '/')} |`,
+    `| Kanal | ${p.channel.replace(/\|/g, '/')} |`,
+    `| Budget | ${eur(p.budget_eur)} extern · ${p.owner_hours} Std. Owner-Zeit |`,
+    `| Laufzeit | ${p.duration_days} Tage |`,
+    `| Messgröße | ${p.metric.replace(/\|/g, '/')} |`,
+    `| Erfolgskriterium | ${p.success_criterion.replace(/\|/g, '/')} |`,
+    '',
+    '**Deine Schritte:**',
+    ...(p.owner_steps.length ? p.owner_steps.map((x) => `- ${x}`) : ['- keine']),
+    '',
+    '**Bereitet Davenet vor:**',
+    ...(p.materials.length ? p.materials.map((x) => `- ${x}`) : ['- nichts']),
+  ];
+}
 
 export interface CreateJobInput {
   type: string;
@@ -227,6 +290,11 @@ export class Orchestrator {
       market_score: o.market_score ?? 0,
       technical_score: o.technical_score ?? 0,
       risk_score: o.risk_score ?? 0,
+      criteria: o.criteria,
+      knockouts: o.knockouts,
+      legal: o.legal,
+      test: o.test,
+      fixed_costs_eur_month: o.fixed_costs_eur_month,
       confidence: o.confidence ?? 0,
       score: o.score,
       sources: o.sources,
@@ -250,7 +318,17 @@ export class Orchestrator {
   }
 
   updateOpportunity(id: string, patch: Partial<Opportunity>, actor = 'owner'): Opportunity {
-    const allowed: (keyof Opportunity)[] = ['title', 'problem', 'target_customer', 'proposed_solution', 'competition_summary', 'revenue_model', 'notes', 'sources'];
+    const allowed: (keyof Opportunity)[] = [
+      'title',
+      'problem',
+      'target_customer',
+      'proposed_solution',
+      'competition_summary',
+      'revenue_model',
+      'notes',
+      'sources',
+      'fixed_costs_eur_month',
+    ];
     const clean: Partial<Opportunity> = {};
     for (const k of allowed) if (k in patch) (clean as Record<string, unknown>)[k] = patch[k];
     const opp = this.store.opportunities.update(id, clean);
@@ -281,7 +359,18 @@ export class Orchestrator {
         return { opportunity: this.store.opportunities.require(id), job };
       }
       case 'propose':
+        // Bau direkt vorschlagen (ohne Nachfragetest oder nach bestandenem Test)
         return { opportunity: this.propose(id, 'owner') };
+      case 'propose_test':
+        return { opportunity: this.proposeTest(id, 'owner') };
+      case 'test_live':
+        return { opportunity: this.markTestLive(id) };
+      case 'test_result': {
+        if (!reason) throw new ValidationError('Bitte das Ergebnis des Tests beschreiben (Zahlen, Beobachtungen)');
+        return this.recordTestResult(id, reason);
+      }
+      case 'stop':
+        return { opportunity: this.stopOpportunity(id, reason ?? 'vom Owner beendet', 'owner') };
       case 'plan': {
         if (!['APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY'].includes(opp.status)) {
           throw new ConflictError('Planung erst nach Owner-Freigabe des Projektstarts');
@@ -301,6 +390,12 @@ export class Orchestrator {
       case 'reject':
         this.cancelOpenWork(id);
         return { opportunity: this.setOpportunityStatus(id, 'REJECTED', reason ?? 'vom Owner verworfen') };
+      case 'evaluate_test': {
+        // erneute Auswertung, z. B. nach Ergänzung von Einnahmen
+        if (!opp.test?.result) throw new ConflictError('Zuerst das Testergebnis erfassen');
+        const job = this.createJob({ type: 'test_evaluation', opportunity_id: id, created_by: 'owner' });
+        return { opportunity: opp, job };
+      }
       case 'hold':
         return { opportunity: this.setOpportunityStatus(id, 'ON_HOLD', reason ?? 'vom Owner zurückgestellt') };
       case 'reopen':
@@ -310,11 +405,13 @@ export class Orchestrator {
     }
   }
 
-  private cancelOpenWork(oppId: string): void {
+  private cancelOpenWork(oppId: string, exceptApprovalId?: number): void {
     for (const j of this.store.jobs.openForOpportunity(oppId)) {
       if (j.status !== 'RUNNING') this.cancelJob(j.id, 'system');
     }
-    for (const a of this.store.approvals.pending(undefined, oppId)) this.store.approvals.decide(a.id, 'CANCELLED', 'Opportunity verworfen');
+    for (const a of this.store.approvals.pending(undefined, oppId)) {
+      if (a.id !== exceptApprovalId) this.store.approvals.decide(a.id, 'CANCELLED', 'Opportunity beendet oder verworfen');
+    }
   }
 
   deleteOpportunity(id: string): void {
@@ -389,7 +486,30 @@ export class Orchestrator {
     if (!job) for (const id of ids) this.setOpportunityStatus(id, 'DISCOVERED', 'Screening ist deaktiviert');
   }
 
-  applyScreening(ctx: JobContext, out: { results: { id: string; decision: 'PASS' | 'REJECT'; market_score: number; technical_score: number; risk_score: number; reason: string }[] }): void {
+  /** Übernimmt Kriterien-Werte (0–10) aus einer Modellantwort. */
+  private cleanCriteria(raw: Record<string, unknown> | undefined, withNotes: boolean): CriteriaScores {
+    const out: CriteriaScores = {};
+    for (const key of CRITERION_KEYS) {
+      const v = raw?.[key] as number | { score?: number; note?: string } | undefined;
+      const score = clamp(typeof v === 'number' ? v : v?.score, 0, 10);
+      if (score == null) continue;
+      out[key] = { score: Math.round(score * 10) / 10, note: withNotes && typeof v === 'object' ? String(v?.note ?? '').slice(0, 300) : '' };
+    }
+    return out;
+  }
+
+  private criteriaTable(c: CriteriaScores): string[] {
+    return [
+      '| Kriterium | Wert | Begründung |',
+      '|---|---|---|',
+      ...CRITERIA.map((k) => `| ${k.label} | ${c[k.key]?.score ?? '–'} | ${(c[k.key]?.note ?? '').replace(/\|/g, '/')} |`),
+    ];
+  }
+
+  applyScreening(
+    ctx: JobContext,
+    out: { results: { id: string; decision: 'PASS' | 'REJECT'; criteria: Record<string, number>; legal_flag: 'ok' | 'check' | 'red'; legal_note: string; reason: string }[] },
+  ): void {
     const ids = (Array.isArray(ctx.job.input.opportunity_ids) ? ctx.job.input.opportunity_ids : []) as string[];
     const threshold = this.settings.deep_research_threshold;
     const seen = new Set<string>();
@@ -399,27 +519,52 @@ export class Orchestrator {
       seen.add(id);
       const opp = this.store.opportunities.get(id);
       if (!opp || !['SCREENING', 'DISCOVERED'].includes(opp.status)) continue;
-      const m = clamp(r.market_score, 0, 10);
-      const t = clamp(r.technical_score, 0, 10);
-      const k = clamp(r.risk_score, 0, 10);
-      const score = computeScore(this.settings, m, t, k);
-      this.store.opportunities.update(id, { market_score: m, technical_score: t, risk_score: k, score });
+      const criteria = this.cleanCriteria(r.criteria, false);
+      const legal: LegalCheck | null =
+        opp.legal?.source === 'research'
+          ? opp.legal
+          : {
+              status: r.legal_flag === 'red' ? 'red' : r.legal_flag === 'check' ? 'yellow' : 'green',
+              how_possible: String(r.legal_note ?? '').trim() || (r.legal_flag === 'ok' ? 'Im Screening keine rechtlichen Hürden erkennbar (vorläufig).' : ''),
+              effort_one_time_hours: null,
+              effort_one_time_eur: null,
+              effort_ongoing_hours_month: null,
+              effort_ongoing_eur_month: null,
+              steps: [],
+              open_questions: [],
+              source: 'screening',
+              checked_at: new Date().toISOString(),
+            };
+      const ko = knockouts(criteria, legal, null, this.settings);
+      const score = cappedScore(criteriaScore(criteria, this.settings.criteria_weights), ko);
+      this.store.opportunities.update(id, { criteria, knockouts: ko, legal, score });
       this.memory.saveArtifact(this.store, {
         area: 'opportunities',
         kind: 'screening_note',
         title: `Screening ${id}`,
-        content: `# Screening ${id}\n\nEntscheidung: **${r.decision}** – Score ${score ?? '–'} (Schwelle ${threshold})\n\nMarkt ${m} · Technik ${t} · Risiko ${k}\n\n${r.reason}`,
-        summary: `${r.decision}, Score ${score}: ${r.reason}`,
+        content: [
+          `# Screening ${id}`,
+          '',
+          `Entscheidung: **${r.decision}** – Score ${score ?? '–'} (Schwelle ${threshold})`,
+          ko.length ? `\n**K.-o.:** ${ko.join('; ')}` : '',
+          '',
+          r.reason,
+          '',
+          `Rechtlich (vorläufig): ${legal ? LEGAL_STATUS_LABELS[legal.status] : '–'}${legal?.how_possible ? ` – ${legal.how_possible}` : ''}`,
+          '',
+          ...this.criteriaTable(criteria),
+        ].join('\n'),
+        summary: `${r.decision}, Score ${score}${ko.length ? ` (K.-o.: ${ko.join('; ')})` : ''}: ${r.reason}`,
         job_id: ctx.job.id,
         agent_id: ctx.agent.id,
         opportunity_id: id,
       });
-      if (r.decision === 'PASS' && score != null && score >= threshold) {
+      if (r.decision === 'PASS' && !ko.length && score != null && score >= threshold) {
         // Konzept §15: "Opportunity score > threshold -> Deep Research"
         this.setOpportunityStatus(id, 'RESEARCH', `Screening bestanden (Score ${score})`);
         this.createJob({ type: 'deep_research', opportunity_id: id, parent_job_id: ctx.job.id, automatic: true });
       } else {
-        const why = r.decision === 'PASS' ? `Score ${score} unter Schwelle ${threshold}` : 'Screening: abgelehnt';
+        const why = ko.length ? `K.-o.: ${ko.join('; ')}` : r.decision === 'PASS' ? `Score ${score} unter Schwelle ${threshold}` : 'Screening: abgelehnt';
         this.setOpportunityStatus(id, 'REJECTED', `${why} – ${r.reason}`.slice(0, 500));
       }
     }
@@ -439,10 +584,39 @@ export class Orchestrator {
 
   // ---------------------------------------------------------------- Pipeline: Research & Bewertung
 
-  applyResearch(ctx: JobContext, out: { report_markdown: string; problem: string; target_customer: string; proposed_solution: string; competition_summary: string; revenue_model: string; market_notes: string; key_risks: string[]; sources: { title: string; url: string; note?: string }[] }): void {
+  applyResearch(
+    ctx: JobContext,
+    out: {
+      report_markdown: string;
+      problem: string;
+      target_customer: string;
+      proposed_solution: string;
+      competition_summary: string;
+      revenue_model: string;
+      market_notes: string;
+      key_risks: string[];
+      legal: Omit<LegalCheck, 'source' | 'checked_at'>;
+      sources: { title: string; url: string; note?: string }[];
+    },
+  ): void {
     const opp = ctx.opportunity!;
     const sources = [...opp.sources];
     for (const s of out.sources ?? []) if (s?.url && !sources.some((x) => x.url === s.url)) sources.push(s);
+    const l = out.legal;
+    const legal: LegalCheck | null = l
+      ? {
+          status: (['green', 'yellow', 'red'] as const).find((x) => x === l.status) ?? 'yellow',
+          how_possible: String(l.how_possible ?? '').trim(),
+          effort_one_time_hours: clamp(l.effort_one_time_hours, 0, 10000),
+          effort_one_time_eur: clamp(l.effort_one_time_eur, 0, 1e7),
+          effort_ongoing_hours_month: clamp(l.effort_ongoing_hours_month, 0, 1000),
+          effort_ongoing_eur_month: clamp(l.effort_ongoing_eur_month, 0, 1e6),
+          steps: (l.steps ?? []).filter((x) => x?.step).map((x) => ({ step: String(x.step), details: String(x.details ?? '') })).slice(0, 20),
+          open_questions: (l.open_questions ?? []).map(String).filter(Boolean).slice(0, 15),
+          source: 'research',
+          checked_at: new Date().toISOString(),
+        }
+      : opp.legal;
     this.store.opportunities.update(opp.id, {
       problem: out.problem || opp.problem,
       target_customer: out.target_customer || opp.target_customer,
@@ -450,6 +624,7 @@ export class Orchestrator {
       competition_summary: out.competition_summary || opp.competition_summary,
       revenue_model: out.revenue_model || opp.revenue_model,
       sources: sources.slice(0, 25),
+      legal,
     });
     const md = [
       `# Recherchebericht ${opp.id}: ${opp.title}`,
@@ -461,6 +636,8 @@ export class Orchestrator {
       '',
       '## Wichtigste Risiken',
       ...(out.key_risks?.length ? out.key_risks.map((r) => `- ${r}`) : ['- (keine genannt)']),
+      '',
+      ...this.legalMarkdown(legal),
       '',
       '## Quellen',
       ...(out.sources ?? []).map((s) => `- [${s.title}](${s.url})${s.note ? ` – ${s.note}` : ''}`),
@@ -475,31 +652,82 @@ export class Orchestrator {
       agent_id: ctx.agent.id,
       opportunity_id: opp.id,
     });
+    const current = this.store.opportunities.require(opp.id);
+    if (!PRE_DECISION_STATUSES.includes(current.status)) return; // laufender Test/Projekt: nur Wissen ergänzen
     this.setOpportunityStatus(opp.id, 'EVALUATION', null);
     this.createJob({ type: 'evaluation', opportunity_id: opp.id, parent_job_id: ctx.job.id, automatic: true });
   }
 
-  applyEvaluation(ctx: JobContext, out: { market_score: number; technical_score: number; risk_score: number; confidence: number; recommendation: 'GO' | 'NO_GO'; rationale: string; mvp_outline: string; estimated_effort: string }): void {
+  private legalMarkdown(legal: LegalCheck | null): string[] {
+    if (!legal) return ['## Rechtliche und Plattform-Prüfung', '- nicht durchgeführt'];
+    const h = (v: number | null) => (v == null ? '–' : String(v));
+    return [
+      '## Rechtliche und Plattform-Prüfung',
+      `**Einstufung: ${LEGAL_STATUS_LABELS[legal.status]}**`,
+      '',
+      legal.how_possible,
+      '',
+      `Aufwand einmalig: ${h(legal.effort_one_time_hours)} Std., ${h(legal.effort_one_time_eur)} € · laufend: ${h(legal.effort_ongoing_hours_month)} Std./Monat, ${h(legal.effort_ongoing_eur_month)} €/Monat`,
+      '',
+      '**Nötige Schritte:**',
+      ...(legal.steps.length ? legal.steps.map((s, i) => `${i + 1}. ${s.step}${s.details ? ` – ${s.details}` : ''}`) : ['- keine']),
+      ...(legal.open_questions.length ? ['', '**Offene Fragen:**', ...legal.open_questions.map((q) => `- ${q}`)] : []),
+      '',
+      '_Keine Rechtsberatung – im Zweifel fachlich prüfen lassen._',
+    ];
+  }
+
+  applyEvaluation(
+    ctx: JobContext,
+    out: {
+      criteria: Record<string, { score: number; note: string }>;
+      confidence: number;
+      recommendation: 'GO' | 'NO_GO';
+      rationale: string;
+      test_plan: TestPlan;
+      mvp_outline: string;
+      estimated_effort: string;
+    },
+  ): void {
     const opp = ctx.opportunity!;
-    const m = clamp(out.market_score, 0, 10);
-    const t = clamp(out.technical_score, 0, 10);
-    const k = clamp(out.risk_score, 0, 10);
+    const s = this.settings;
+    const criteria = this.cleanCriteria(out.criteria, true);
+    const plan = out.test_plan ? cleanPlan(out.test_plan) : null;
+    const ko = knockouts(criteria, opp.legal, plan, s);
+    const base = criteriaScore(criteria, s.criteria_weights);
+    const score = cappedScore(base, ko);
     const confidence = clamp(out.confidence, 0, 1);
-    const score = computeScore(this.settings, m, t, k);
-    this.store.opportunities.update(opp.id, { market_score: m, technical_score: t, risk_score: k, confidence, score });
+    // Ein laufender Test oder ein Projekt wird durch eine Neubewertung nicht zurückgesetzt
+    const decided = !PRE_DECISION_STATUSES.includes(opp.status);
+    const test: TestState | null = plan && !decided
+      ? {
+          attempt: 1,
+          status: 'PROPOSED',
+          plan,
+          guardrail_issues: guardrailIssues(plan, s),
+          started_at: null,
+          ends_at: null,
+          result: null,
+          evaluation: null,
+          history: [],
+        }
+      : opp.test;
+    this.store.opportunities.update(opp.id, { criteria, knockouts: ko, score, confidence, test });
     const md = [
       `# Bewertung ${opp.id}: ${opp.title}`,
       '',
-      `**Empfehlung: ${out.recommendation}** · Gesamt-Score ${score ?? '–'} · Konfidenz ${confidence ?? '–'}`,
+      `**Empfehlung: ${out.recommendation}** · Gesamt-Score ${score ?? '–'}${ko.length && base != null ? ` (ohne K.-o. ${base})` : ''} · Konfidenz ${confidence ?? '–'}`,
+      ...(ko.length ? ['', `**K.-o.-Kriterien:** ${ko.join('; ')}`] : []),
       '',
-      `| Markt | Technik | Risiko |`,
-      `|---|---|---|`,
-      `| ${m} | ${t} | ${k} |`,
+      ...this.criteriaTable(criteria),
       '',
       '## Begründung',
       out.rationale,
       '',
-      '## MVP-Skizze',
+      '## Nachfragetest',
+      ...(plan ? planMarkdown(plan) : ['- kein Testplan']),
+      '',
+      '## MVP-Skizze (nach erfolgreichem Test)',
       out.mvp_outline,
       '',
       `**Aufwand:** ${out.estimated_effort}`,
@@ -509,33 +737,121 @@ export class Orchestrator {
       kind: 'evaluation',
       title: `Bewertung ${opp.id}`,
       content: md,
-      summary: `${out.recommendation}, Score ${score}: ${out.rationale.slice(0, 300)}`,
+      summary: `${out.recommendation}, Score ${score}${ko.length ? ` (K.-o.: ${ko.join('; ')})` : ''}: ${out.rationale.slice(0, 300)}`,
       job_id: ctx.job.id,
       agent_id: ctx.agent.id,
       opportunity_id: opp.id,
     });
-    const threshold = this.settings.proposal_threshold;
-    if (out.recommendation === 'GO' && score != null && score >= threshold) {
-      this.propose(opp.id, `agent:${ctx.agent.id}`);
+    const threshold = s.proposal_threshold;
+    if (decided) return;
+    if (out.recommendation === 'GO' && !ko.length && score != null && score >= threshold) {
+      if (s.require_demand_test && plan) this.proposeTest(opp.id, `agent:${ctx.agent.id}`);
+      else this.propose(opp.id, `agent:${ctx.agent.id}`);
     } else {
-      const why = out.recommendation === 'GO' ? `Score ${score} unter Vorschlags-Schwelle ${threshold}` : 'Bewertung: NO_GO';
+      const why = ko.length
+        ? `K.-o.: ${ko.join('; ')}`
+        : out.recommendation === 'GO'
+          ? `Score ${score} unter Vorschlags-Schwelle ${threshold}`
+          : 'Bewertung: NO_GO';
       this.setOpportunityStatus(opp.id, 'REJECTED', `${why} – ${out.rationale}`.slice(0, 500));
     }
   }
 
-  /** Legt die Opportunity dem Owner zur Freigabe des Projektstarts vor (Approval-Level 2). */
+  /** Belegte Plätze für Tests und Projekte (Leitplanke "höchstens N gleichzeitig"). */
+  private slotsUsed(exceptId?: string): string[] {
+    return this.store.opportunities
+      .list({ status: SLOT_STATUSES })
+      .map((o) => o.id)
+      .filter((id) => id !== exceptId);
+  }
+
+  private slotCheck(oppId: string): void {
+    const used = this.slotsUsed(oppId);
+    const max = this.settings.guard_max_parallel;
+    if (used.length >= max) {
+      throw new ConflictError(
+        `Leitplanke: Es laufen bereits ${used.length} von höchstens ${max} Tests/Projekten (${used.join(', ')}). ` +
+          'Beende oder pausiere zuerst eins – oder erhöhe die Grenze unter Einstellungen → Leitplanken.',
+      );
+    }
+  }
+
+  private slotLine(oppId: string): string {
+    const used = this.slotsUsed(oppId);
+    const max = this.settings.guard_max_parallel;
+    return used.length >= max
+      ? `⚠ Alle Plätze belegt (${used.length}/${max}: ${used.join(', ')}) – eine Freigabe ist erst möglich, wenn ein Test oder Projekt endet.`
+      : `Plätze für Tests/Projekte: ${used.length}/${max} belegt.`;
+  }
+
+  /** Legt dem Owner den Nachfragetest zur Freigabe vor (Approval-Level 2, Strategie §8). */
+  proposeTest(oppId: string, actor: string): Opportunity {
+    const opp = this.store.opportunities.require(oppId);
+    if (!opp.test?.plan) throw new ValidationError('Noch kein Testplan – zuerst bewerten lassen');
+    if (['APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY', 'DEPLOYED'].includes(opp.status)) throw new ConflictError('Projekt läuft bereits');
+    if (opp.test.status !== 'PROPOSED' && opp.status === 'TESTING' && !['PASSED', 'FAILED'].includes(opp.test.status)) {
+      throw new ConflictError('Der Nachfragetest läuft bereits');
+    }
+    const test: TestState = { ...opp.test, status: 'PROPOSED', guardrail_issues: guardrailIssues(opp.test.plan, this.settings) };
+    this.store.opportunities.update(oppId, { test });
+    const updated = opp.status === 'TESTING' ? this.setOpportunityStatus(oppId, 'TESTING', 'Wiederholungstest vorgeschlagen') : this.setOpportunityStatus(oppId, 'PROPOSED', 'Nachfragetest vorgeschlagen');
+    for (const a of this.store.approvals.pending('PROJECT_START', oppId)) this.store.approvals.decide(a.id, 'CANCELLED', 'ersetzt durch Nachfragetest');
+    if (!this.store.approvals.pending('TEST_START', oppId).length) {
+      const fresh = this.store.opportunities.require(oppId);
+      const approval = this.store.approvals.create({
+        type: 'TEST_START',
+        level: 2,
+        title: `Nachfragetest${test.attempt > 1 ? ` (Versuch ${test.attempt})` : ''}: ${opp.id} ${opp.title}`,
+        summary: [
+          `**Score ${fresh.score ?? '–'}** · Rechtlich: ${fresh.legal ? LEGAL_STATUS_LABELS[fresh.legal.status] : 'nicht geprüft'}`,
+          '',
+          ...planMarkdown(test.plan),
+          '',
+          ...(test.guardrail_issues.length ? [`⚠ Leitplanken überschritten: ${test.guardrail_issues.join('; ')}`, ''] : []),
+          this.slotLine(oppId),
+          '',
+          'Mit der Freigabe bereitet Davenet die Testmaterialien vor. Accounts, Veröffentlichung und Zahlungen bleiben deine Schritte.',
+        ].join('\n'),
+        payload: { attempt: test.attempt, plan: test.plan, score: fresh.score, guardrail_issues: test.guardrail_issues },
+        opportunity_id: oppId,
+      });
+      this.audit(actor, 'approval.requested', 'approval', approval.id, 2, { type: 'TEST_START', opportunity_id: oppId });
+      this.changed('approval', approval.id);
+    }
+    return updated;
+  }
+
+  /** Legt die Opportunity dem Owner zur Freigabe des Projektstarts (Bau) vor (Approval-Level 2). */
   propose(oppId: string, actor: string): Opportunity {
     const opp = this.store.opportunities.require(oppId);
     if (['DEVELOPMENT', 'REVIEW', 'READY', 'DEPLOYED', 'APPROVED'].includes(opp.status)) throw new ConflictError('Projekt läuft bereits');
-    const updated = this.setOpportunityStatus(oppId, 'PROPOSED', null);
+    // Während/nach einem Test behält die Opportunity ihren Platz, bis über den Bau entschieden ist
+    const updated =
+      opp.status === 'TESTING' ? this.setOpportunityStatus(oppId, 'TESTING', 'Bau zur Freigabe vorgeschlagen') : this.setOpportunityStatus(oppId, 'PROPOSED', null);
+    for (const a of this.store.approvals.pending('TEST_START', oppId)) this.store.approvals.decide(a.id, 'CANCELLED', 'ersetzt durch Projektstart');
     if (!this.store.approvals.pending('PROJECT_START', oppId).length) {
       const evaluation = this.store.artifacts.latest(oppId, 'evaluation');
+      const t = opp.test;
+      const testLines =
+        t?.evaluation || t?.result
+          ? [
+              '## Ergebnis des Nachfragetests',
+              `Versuch ${t.attempt}: ${t.evaluation ? `${TEST_VERDICT_LABELS[t.evaluation.verdict]} – ${t.evaluation.summary.replace(/^#+\s*/gm, '')}` : ''}`,
+              t.result ? `Ergebnis laut Owner: ${t.result.notes}` : '',
+              '',
+            ]
+          : [];
       const approval = this.store.approvals.create({
         type: 'PROJECT_START',
         level: 2,
         title: `Projektstart: ${opp.id} ${opp.title}`,
-        summary: evaluation ? this.memory.readArtifact(evaluation).slice(0, 4000) : `${opp.problem}\n\nLösung: ${opp.proposed_solution}`,
-        payload: { score: opp.score, market_score: opp.market_score, technical_score: opp.technical_score, risk_score: opp.risk_score },
+        summary: [
+          ...testLines,
+          evaluation ? this.memory.readArtifact(evaluation).slice(0, 4000) : `${opp.problem}\n\nLösung: ${opp.proposed_solution}`,
+          '',
+          this.slotLine(oppId),
+        ].join('\n'),
+        payload: { score: opp.score, test_verdict: t?.evaluation?.verdict ?? null },
         opportunity_id: oppId,
       });
       this.audit(actor, 'approval.requested', 'approval', approval.id, 2, { type: 'PROJECT_START', opportunity_id: oppId });
@@ -544,11 +860,201 @@ export class Orchestrator {
     return updated;
   }
 
+  /** Abbruch vorschlagen (Abbruchregel, Strategie §8) – der Owner entscheidet. */
+  requestStop(oppId: string, reason: string, actor: string): void {
+    const opp = this.store.opportunities.require(oppId);
+    if (this.store.approvals.pending('PROJECT_STOP', oppId).length) return;
+    const total = this.store.finance.totals({ opportunity_id: oppId });
+    const approval = this.store.approvals.create({
+      type: 'PROJECT_STOP',
+      level: 2,
+      title: `Beenden: ${opp.id} ${opp.title}`,
+      summary: [
+        `**Empfehlung: beenden.** ${reason}`,
+        '',
+        `Bisher erfasst: Einnahmen ${eur(total.revenue_eur)}, Ausgaben ${eur(total.expense_eur)}, Owner-Zeit ${total.hours} Std.` +
+          (opp.fixed_costs_eur_month ? `, Fixkosten ${eur(opp.fixed_costs_eur_month)}/Monat` : ''),
+        '',
+        'Mit der Freigabe wird die Opportunity beendet und offene Arbeit gestoppt. Laufende Verträge, Abos oder Listings beendest du selbst.',
+      ].join('\n'),
+      payload: { reason },
+      opportunity_id: oppId,
+    });
+    this.audit(actor, 'approval.requested', 'approval', approval.id, 2, { type: 'PROJECT_STOP', opportunity_id: oppId });
+    this.changed('approval', approval.id);
+  }
+
+  stopOpportunity(oppId: string, reason: string, actor: string, exceptApprovalId?: number): Opportunity {
+    this.store.opportunities.require(oppId);
+    this.cancelOpenWork(oppId, exceptApprovalId);
+    this.audit(actor, 'opportunity.stopped', 'opportunity', oppId, 2, { reason });
+    return this.setOpportunityStatus(oppId, 'STOPPED', reason.slice(0, 500));
+  }
+
+  // ---------------------------------------------------------------- Pipeline: Nachfragetest (Strategie §8)
+
+  private updateTest(oppId: string, patch: Partial<TestState>): TestState {
+    const opp = this.store.opportunities.require(oppId);
+    if (!opp.test) throw new ConflictError('Kein Nachfragetest vorhanden');
+    const test = { ...opp.test, ...patch };
+    this.store.opportunities.update(oppId, { test });
+    this.syncOpportunityFile(this.store.opportunities.require(oppId));
+    this.changed('opportunity', oppId);
+    return test;
+  }
+
+  markTestLive(oppId: string): Opportunity {
+    const opp = this.store.opportunities.require(oppId);
+    if (opp.status !== 'TESTING' || !opp.test || !['PREPARING', 'READY'].includes(opp.test.status)) {
+      throw new ConflictError('Der Test ist nicht startbereit (erst nach Freigabe und Vorbereitung)');
+    }
+    const now = new Date();
+    const ends = new Date(now.getTime() + opp.test.plan.duration_days * 86400_000);
+    this.updateTest(oppId, { status: 'RUNNING', started_at: now.toISOString(), ends_at: ends.toISOString() });
+    this.audit('owner', 'test.started', 'opportunity', oppId, 0, { ends_at: ends.toISOString() });
+    return this.setOpportunityStatus(oppId, 'TESTING', `Test läuft bis ${localDay(ends)}`);
+  }
+
+  recordTestResult(oppId: string, notes: string): { opportunity: Opportunity; job: Job | null } {
+    const opp = this.store.opportunities.require(oppId);
+    if (opp.status !== 'TESTING' || !opp.test) throw new ConflictError('Für diese Opportunity läuft kein Nachfragetest');
+    this.updateTest(oppId, {
+      status: 'EVALUATING',
+      started_at: opp.test.started_at ?? new Date().toISOString(),
+      result: { notes: notes.slice(0, 4000), recorded_at: new Date().toISOString() },
+    });
+    this.audit('owner', 'test.result', 'opportunity', oppId, 0, {});
+    const job = this.createJob({ type: 'test_evaluation', opportunity_id: oppId, created_by: 'owner', automatic: true });
+    if (!job) this.updateTest(oppId, { status: 'RUNNING' });
+    return { opportunity: this.setOpportunityStatus(oppId, 'TESTING', job ? 'Ergebnis wird ausgewertet' : 'Ergebnis erfasst'), job };
+  }
+
+  async applyTestPreparation(
+    ctx: JobContext,
+    out: { summary: string; files: string[]; owner_checklist: { step: string; minutes: number }[]; measurement: string; image_requests?: ImageRequest[] },
+    info: CompletionInfo,
+  ): Promise<void> {
+    const opp = ctx.opportunity!;
+    const files = [...new Set([...(info.filesChanged ?? []), ...(out.files ?? [])])].slice(0, 200);
+    const commit = await commitWorkspace(this.memory.workspaceDir(opp.id), `${opp.id}: Testpaket Nachfragetest`);
+    const minutes = (out.owner_checklist ?? []).reduce((sum, c) => sum + Math.max(0, num(c.minutes)), 0);
+    const planned = (opp.test?.plan.owner_hours ?? 0) * 60;
+    const imageNotes = this.requestImages(ctx, out.image_requests);
+    const md = [
+      `# Testpaket ${opp.id}: ${opp.title}`,
+      '',
+      out.summary,
+      '',
+      '## Deine Schritte',
+      ...(out.owner_checklist?.length ? out.owner_checklist.map((c, i) => `${i + 1}. ${c.step} (ca. ${Math.round(num(c.minutes))} Min.)`) : ['- keine']),
+      '',
+      `Geschätzte Owner-Zeit: ${Math.round(minutes)} Min.${planned && minutes > planned ? ` – ⚠ mehr als geplant (${Math.round(planned)} Min.)` : ''}`,
+      '',
+      '## Messung',
+      out.measurement,
+      '',
+      '## Dateien im Workspace',
+      ...(files.length ? files.map((f) => `- ${f}`) : ['- (keine)']),
+      ...(imageNotes.length ? ['', '## Bilder', ...imageNotes.map((n) => `- ${n}`)] : []),
+      commit ? `\nGit-Commit: \`${commit}\`` : '',
+      '',
+      'Wenn alles veröffentlicht ist: in Davenet „Test ist live“ klicken. Einnahmen, Ausgaben und deine Zeit unter „Test & Zahlen“ erfassen.',
+    ].join('\n');
+    this.memory.saveArtifact(this.store, {
+      area: 'projects',
+      kind: 'test_kit',
+      title: `Testpaket ${opp.id}`,
+      content: md,
+      summary: out.summary,
+      job_id: ctx.job.id,
+      agent_id: ctx.agent.id,
+      opportunity_id: opp.id,
+    });
+    this.audit(`agent:${ctx.agent.id}`, 'workspace.changed', 'opportunity', opp.id, 1, { files, commit });
+    if (opp.test && opp.test.status === 'PREPARING') this.updateTest(opp.id, { status: 'READY' });
+    this.setOpportunityStatus(opp.id, 'TESTING', 'Testpaket bereit – deine Schritte');
+  }
+
+  onTestPreparationFailed(ctx: JobContext, reason: string): void {
+    const opp = ctx.opportunity ? this.store.opportunities.get(ctx.opportunity.id) : undefined;
+    if (opp?.test?.status === 'PREPARING') {
+      this.updateTest(opp.id, { status: 'READY' });
+      this.setOpportunityStatus(opp.id, 'TESTING', `Vorbereitung fehlgeschlagen – Materialien selbst erstellen oder Job wiederholen: ${reason}`.slice(0, 300));
+    }
+  }
+
+  applyTestEvaluation(
+    ctx: JobContext,
+    out: { verdict: TestVerdict; success_criterion_met: boolean; summary: string; reasoning: string; adjusted_plan?: TestPlan; next_steps: string[] },
+  ): void {
+    const opp = this.store.opportunities.require(ctx.opportunity!.id);
+    const test = opp.test;
+    if (!test) return;
+    const evaluation = { verdict: out.verdict, success_criterion_met: !!out.success_criterion_met, summary: out.summary, recorded_at: new Date().toISOString() };
+    let verdict = out.verdict;
+    if (verdict === 'ADJUST' && (test.attempt >= 2 || !out.adjusted_plan)) verdict = 'STOP';
+    this.memory.saveArtifact(this.store, {
+      area: 'research',
+      kind: 'test_evaluation',
+      title: `Testauswertung ${opp.id} (Versuch ${test.attempt})`,
+      content: [
+        `# Testauswertung ${opp.id}: ${opp.title}`,
+        '',
+        `**Empfehlung: ${TEST_VERDICT_LABELS[out.verdict]}**${verdict !== out.verdict ? ` → ${TEST_VERDICT_LABELS[verdict]} (höchstens ein Wiederholungstest)` : ''} · Erfolgskriterium ${out.success_criterion_met ? 'erfüllt' : 'nicht erfüllt'}`,
+        '',
+        out.summary,
+        '',
+        '## Begründung',
+        out.reasoning,
+        '',
+        '## Nächste Schritte',
+        ...(out.next_steps?.length ? out.next_steps.map((x) => `- ${x}`) : ['- keine']),
+        ...(verdict === 'ADJUST' && out.adjusted_plan ? ['', '## Angepasster Test', ...planMarkdown(cleanPlan(out.adjusted_plan))] : []),
+      ].join('\n'),
+      summary: `${TEST_VERDICT_LABELS[verdict]}: ${out.summary}`.slice(0, 400),
+      job_id: ctx.job.id,
+      agent_id: ctx.agent.id,
+      opportunity_id: opp.id,
+    });
+    const actor = `agent:${ctx.agent.id}`;
+    if (verdict === 'BUILD') {
+      this.updateTest(opp.id, { status: 'PASSED', evaluation });
+      this.propose(opp.id, actor);
+    } else if (verdict === 'ADJUST') {
+      const plan = cleanPlan(out.adjusted_plan!);
+      const round = { attempt: test.attempt, plan: test.plan, started_at: test.started_at, ends_at: test.ends_at, result: test.result, evaluation };
+      this.updateTest(opp.id, {
+        attempt: test.attempt + 1,
+        status: 'PROPOSED',
+        plan,
+        guardrail_issues: guardrailIssues(plan, this.settings),
+        started_at: null,
+        ends_at: null,
+        result: null,
+        evaluation: null,
+        history: [...(test.history ?? []), round],
+      });
+      this.proposeTest(opp.id, actor);
+    } else {
+      this.updateTest(opp.id, { status: 'FAILED', evaluation });
+      this.setOpportunityStatus(opp.id, 'TESTING', 'Test nicht bestanden – Beenden vorgeschlagen');
+      this.requestStop(opp.id, `Nachfragetest nicht bestanden: ${out.summary}`, actor);
+    }
+  }
+
+  onTestEvaluationFailed(ctx: JobContext, _reason: string): void {
+    const opp = ctx.opportunity ? this.store.opportunities.get(ctx.opportunity.id) : undefined;
+    if (opp?.test?.status === 'EVALUATING') this.updateTest(opp.id, { status: 'RUNNING' });
+  }
+
   // ---------------------------------------------------------------- Freigaben (Konzept §14)
 
   decideApproval(id: number, decision: 'APPROVED' | 'REJECTED', note?: string | null, actor = 'owner'): Approval {
     const approval = this.store.approvals.require(id);
     if (approval.status !== 'PENDING') throw new ConflictError('Freigabe wurde bereits entschieden');
+    if (decision === 'APPROVED' && (approval.type === 'TEST_START' || approval.type === 'PROJECT_START') && approval.opportunity_id) {
+      this.slotCheck(approval.opportunity_id); // Leitplanke: höchstens N Tests/Projekte gleichzeitig
+    }
     const decided = this.store.approvals.decide(id, decision, note ?? null);
     this.audit(actor, decision === 'APPROVED' ? 'approval.approved' : 'approval.rejected', 'approval', id, approval.level, {
       type: approval.type,
@@ -559,6 +1065,34 @@ export class Orchestrator {
     this.recordDecision(decided);
 
     switch (approval.type) {
+      case 'TEST_START': {
+        const oppId = approval.opportunity_id!;
+        const opp = this.store.opportunities.get(oppId);
+        if (!opp) break;
+        if (decision === 'APPROVED') {
+          this.setOpportunityStatus(oppId, 'TESTING', 'Testpaket wird vorbereitet');
+          if (opp.test) this.updateTest(oppId, { status: 'PREPARING' });
+          const job = this.createJob({ type: 'test_preparation', opportunity_id: oppId, input: note ? { notes: note } : {}, automatic: true, created_by: 'owner' });
+          if (!job) {
+            if (opp.test) this.updateTest(oppId, { status: 'READY' });
+            this.setOpportunityStatus(oppId, 'TESTING', 'Testvorbereitung ist deaktiviert – Materialien selbst erstellen');
+          }
+        } else if ((opp.test?.attempt ?? 1) > 1) {
+          if (opp.test) this.updateTest(oppId, { status: 'FAILED' });
+          this.stopOpportunity(oppId, `Wiederholungstest abgelehnt${note ? `: ${note}` : ''}`, actor, id);
+        } else {
+          this.setOpportunityStatus(oppId, 'REJECTED', `Nachfragetest abgelehnt${note ? `: ${note}` : ''}`);
+        }
+        break;
+      }
+      case 'PROJECT_STOP': {
+        const oppId = approval.opportunity_id!;
+        if (decision === 'APPROVED' && this.store.opportunities.get(oppId)) {
+          const reason = String((approval.payload as { reason?: string }).reason ?? 'Abbruchregel');
+          this.stopOpportunity(oppId, `${reason}${note ? ` – ${note}` : ''}`, actor, id);
+        }
+        break;
+      }
       case 'PROJECT_START': {
         const oppId = approval.opportunity_id!;
         if (decision === 'APPROVED') {
@@ -716,11 +1250,16 @@ export class Orchestrator {
     return started;
   }
 
-  async applyImplementation(ctx: JobContext, out: { summary: string; files_changed: string[]; notes_for_reviewer: string; open_issues: string[] }, info: CompletionInfo): Promise<void> {
+  async applyImplementation(
+    ctx: JobContext,
+    out: { summary: string; files_changed: string[]; notes_for_reviewer: string; open_issues: string[]; image_requests?: ImageRequest[] },
+    info: CompletionInfo,
+  ): Promise<void> {
     const task = ctx.task!;
     const opp = ctx.opportunity!;
     const files = [...new Set([...(info.filesChanged ?? []), ...(out.files_changed ?? [])])].slice(0, 200);
     const commit = await commitWorkspace(this.memory.workspaceDir(opp.id), `${task.id}: ${task.title}`);
+    const imageNotes = this.requestImages(ctx, out.image_requests);
     const md = [
       `# Implementierung ${task.id}: ${task.title}`,
       '',
@@ -734,6 +1273,7 @@ export class Orchestrator {
       '',
       '## Offene Punkte',
       ...(out.open_issues?.length ? out.open_issues.map((i) => `- ${i}`) : ['- keine']),
+      ...(imageNotes.length ? ['', '## Bilder', ...imageNotes.map((n) => `- ${n}`)] : []),
       commit ? `\nGit-Commit: \`${commit}\`` : '',
     ].join('\n');
     this.memory.saveArtifact(this.store, {
@@ -915,7 +1455,8 @@ export class Orchestrator {
         } else if (a.type === 'deep_research') {
           const opp = a.opportunity_id ? this.store.opportunities.get(a.opportunity_id.trim().toUpperCase()) : undefined;
           if (!opp) throw new Error(`Opportunity ${a.opportunity_id ?? '?'} unbekannt`);
-          if (!['REJECTED', 'DEPLOYED'].includes(opp.status)) this.setOpportunityStatus(opp.id, 'RESEARCH', 'Auftrag der Leitung');
+          // laufende Tests und Projekte behalten ihren Status – die Recherche ergänzt nur das Wissen
+          if (PRE_DECISION_STATUSES.includes(opp.status)) this.setOpportunityStatus(opp.id, 'RESEARCH', 'Auftrag der Leitung');
           job = this.createJob({ ...base, type: 'deep_research', opportunity_id: opp.id, input: { focus: a.instructions } });
         } else {
           const agent = a.agent_id ? this.store.agents.get(a.agent_id.trim().toUpperCase()) : undefined;
@@ -983,6 +1524,287 @@ export class Orchestrator {
       agent_id: ctx.agent.id,
       opportunity_id: ctx.opportunity?.id ?? null,
     });
+  }
+
+  // ================================================================== Einnahmen, Leitplanken, Portfolio
+
+  addFinanceEntry(
+    e: { opportunity_id?: string | null; kind: FinanceKind; amount_eur?: number | null; hours?: number | null; date?: string | null; note?: string | null },
+    actor = 'owner',
+  ): FinanceEntry {
+    if (e.opportunity_id) this.store.opportunities.require(e.opportunity_id);
+    const date = e.date && /^\d{4}-\d{2}-\d{2}$/.test(e.date) ? e.date : localDay(new Date());
+    if (e.kind === 'time' ? !(num(e.hours) > 0) : !(num(e.amount_eur) > 0)) {
+      throw new ValidationError(e.kind === 'time' ? 'Bitte Stunden angeben' : 'Bitte einen Betrag in € angeben');
+    }
+    const entry = this.store.finance.create({
+      opportunity_id: e.opportunity_id ?? null,
+      kind: e.kind,
+      amount_eur: e.kind === 'time' ? null : Math.round(num(e.amount_eur) * 100) / 100,
+      hours: e.kind === 'time' ? Math.round(num(e.hours) * 100) / 100 : null,
+      date,
+      note: (e.note ?? '').trim().slice(0, 500),
+    });
+    this.audit(actor, 'finance.added', 'finance', entry.id, 0, { kind: entry.kind, amount_eur: entry.amount_eur, hours: entry.hours, opportunity_id: entry.opportunity_id });
+    this.changed('finance', entry.id);
+    return entry;
+  }
+
+  deleteFinanceEntry(id: number, actor = 'owner'): void {
+    const e = this.store.finance.delete(id);
+    this.audit(actor, 'finance.deleted', 'finance', id, 0, { kind: e.kind, amount_eur: e.amount_eur, hours: e.hours, opportunity_id: e.opportunity_id });
+    this.changed('finance', id);
+  }
+
+  guardrails(now = new Date()): GuardrailStatus {
+    const s = this.settings;
+    const ids = this.slotsUsed();
+    const iso = now.getDay() || 7;
+    const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (iso - 1));
+    const hours = this.store.finance.totals({ kind: 'time', from: localDay(weekStart) }).hours;
+    return {
+      parallel: { used: ids.length, max: s.guard_max_parallel, ids },
+      owner_hours_week: { used: Math.round(hours * 100) / 100, max: s.guard_owner_hours_week, week_start: localDay(weekStart) },
+      test_budget_eur: s.guard_test_budget_eur,
+      test_owner_hours: s.guard_test_owner_hours,
+      fixed_costs_eur_month: s.guard_fixed_costs_eur_month,
+    };
+  }
+
+  /** Tests und Produkte mit Einnahmen, Ausgaben, Owner-Zeit und KI-Kosten (Grundlage für Abbruchregel und Review). */
+  portfolioItems(now = new Date()): PortfolioItem[] {
+    const all = this.store.finance.totalsByOpportunity();
+    const month = this.store.finance.totalsByOpportunity({ from: localDay(monthStart(now)) });
+    const last30 = this.store.finance.totalsByOpportunity({ from: localDay(new Date(now.getTime() - 30 * 86400_000)) });
+    const ledger = new Map(this.store.ledger.grouped('opportunity_id').map((r) => [r.key, r]));
+    return this.store.opportunities
+      .list({ status: [...PORTFOLIO_STATUSES, 'STOPPED'] })
+      .filter((o) => o.status !== 'STOPPED' || all.has(o.id))
+      .map((o) => ({
+        id: o.id,
+        title: o.title,
+        status: o.status,
+        score: o.score,
+        test_status: o.test?.status ?? null,
+        test_ends_at: o.test?.ends_at ?? null,
+        fixed_costs_eur_month: o.fixed_costs_eur_month,
+        total: all.get(o.id) ?? emptyTotals(),
+        month: month.get(o.id) ?? emptyTotals(),
+        last30: last30.get(o.id) ?? emptyTotals(),
+        ai_cost_usd: ledger.get(o.id)?.monetary_cost_usd ?? 0,
+        ai_equivalent_usd: ledger.get(o.id)?.equivalent_cost_usd ?? 0,
+        portfolio_note: o.portfolio_note,
+      }));
+  }
+
+  /** Deterministische Portfolio-Kennzahlen für den Review – das Modell rechnet nicht selbst. */
+  portfolioFacts(now = new Date()): string {
+    const g = this.guardrails(now);
+    const items = this.portfolioItems(now).filter((i) => i.status !== 'STOPPED');
+    const lines: string[] = [
+      '### Leitplanken',
+      `- Plätze für Tests/Projekte: ${g.parallel.used} von ${g.parallel.max} belegt${g.parallel.ids.length ? ` (${g.parallel.ids.join(', ')})` : ''}`,
+      `- Owner-Zeit diese Woche (seit ${g.owner_hours_week.week_start}): ${g.owner_hours_week.used} von ${g.owner_hours_week.max} Std.`,
+      `- Je Test höchstens ${eur(g.test_budget_eur)} und ${g.test_owner_hours} Std.; Fixkosten je Produkt höchstens ${eur(g.fixed_costs_eur_month)}/Monat, solange nicht durch Erträge gedeckt`,
+      '### Laufende Tests und Produkte',
+    ];
+    if (!items.length) lines.push('(keine)');
+    for (const i of items) {
+      const o = this.store.opportunities.require(i.id);
+      const t = o.test;
+      const tasks = this.store.tasks.listForOpportunity(o.id);
+      lines.push(`#### ${o.id} ${o.title} [${OPPORTUNITY_STATUS_LABELS[o.status]}] Score ${o.score ?? '–'}`);
+      if (t) {
+        lines.push(
+          `- Nachfragetest (Versuch ${t.attempt}): ${TEST_STATUS_LABELS[t.status]}; Kanal: ${t.plan.channel}; Erfolgskriterium: ${t.plan.success_criterion}; ` +
+            `Laufzeit ${t.plan.duration_days} Tage${t.started_at ? `, gestartet ${t.started_at.slice(0, 10)}` : ''}${t.ends_at ? `, Ende ${t.ends_at.slice(0, 10)}` : ''}` +
+            `${t.result ? `; Ergebnis: ${t.result.notes.slice(0, 300)}` : ''}${t.evaluation ? `; Auswertung: ${TEST_VERDICT_LABELS[t.evaluation.verdict]}` : ''}`,
+        );
+      }
+      lines.push(
+        `- Einnahmen: gesamt ${eur(i.total.revenue_eur)}, dieser Monat ${eur(i.month.revenue_eur)}, letzte 30 Tage ${eur(i.last30.revenue_eur)}`,
+        `- Ausgaben: gesamt ${eur(i.total.expense_eur)}, letzte 30 Tage ${eur(i.last30.expense_eur)}; Fixkosten: ${i.fixed_costs_eur_month != null ? `${eur(i.fixed_costs_eur_month)}/Monat` : 'nicht erfasst'}`,
+        `- Owner-Zeit: gesamt ${i.total.hours} Std., letzte 30 Tage ${i.last30.hours} Std.`,
+        `- KI-Kosten: real $${i.ai_cost_usd.toFixed(2)}, Gegenwert $${i.ai_equivalent_usd.toFixed(2)}`,
+      );
+      if (tasks.length) lines.push(`- Tasks: ${tasks.filter((x) => x.status === 'DONE').length} von ${tasks.length} erledigt`);
+      if (o.portfolio_note) {
+        lines.push(`- Letzte Empfehlung (${o.portfolio_note.at.slice(0, 10)}): ${PORTFOLIO_RECOMMENDATION_LABELS[o.portfolio_note.recommendation]} – ${o.portfolio_note.reason}`);
+      }
+    }
+    const candidates = this.store.opportunities
+      .list({ status: ['PROPOSED', 'EVALUATION'] })
+      .filter((o) => o.score != null)
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, 5);
+    lines.push('### Kandidaten für den nächsten Test', candidates.map((o) => `- ${o.id} ${o.title} – Score ${o.score} [${OPPORTUNITY_STATUS_LABELS[o.status]}]`).join('\n') || '(keine)');
+    const general = this.store.finance.totalsByOpportunity().get('');
+    if (general) {
+      lines.push('### Buchungen ohne Produktbezug (gesamt)', `- Einnahmen ${eur(general.revenue_eur)}, Ausgaben ${eur(general.expense_eur)}, Owner-Zeit ${general.hours} Std.`);
+    }
+    return lines.join('\n');
+  }
+
+  applyPortfolioReview(
+    ctx: JobContext,
+    out: {
+      summary_markdown: string;
+      items: { opportunity_id: string; recommendation: PortfolioRecommendation; reason: string; forecast: string }[];
+      next_test_candidate_id: string;
+      next_test_reason: string;
+      owner_actions: string[];
+    },
+  ): void {
+    const valid = new Set(this.portfolioItems().filter((i) => i.status !== 'STOPPED').map((i) => i.id));
+    const rows: string[] = [];
+    const at = new Date().toISOString();
+    const seen = new Set<string>();
+    for (const item of out.items ?? []) {
+      const id = String(item.opportunity_id ?? '').trim().toUpperCase();
+      if (!valid.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      const rec = PORTFOLIO_RECOMMENDATIONS.find((x) => x === item.recommendation) ?? 'keep';
+      this.store.opportunities.update(id, { portfolio_note: { recommendation: rec, reason: item.reason, forecast: item.forecast, job_id: ctx.job.id, at } });
+      this.changed('opportunity', id);
+      rows.push(`| ${id} | ${PORTFOLIO_RECOMMENDATION_LABELS[rec]} | ${item.reason.replace(/\|/g, '/')} | ${item.forecast.replace(/\|/g, '/')} |`);
+      if (rec === 'stop') this.requestStop(id, `Portfolio-Review: ${item.reason}`, `agent:${ctx.agent.id}`);
+    }
+    const candidateId = String(out.next_test_candidate_id ?? '').trim().toUpperCase();
+    const candidate = candidateId ? this.store.opportunities.get(candidateId) : undefined;
+    const md = [
+      `# ${ctx.job.title}`,
+      '',
+      out.summary_markdown,
+      '',
+      '## Empfehlungen',
+      '| Opportunity | Empfehlung | Begründung | Prognose |',
+      '|---|---|---|---|',
+      ...(rows.length ? rows : ['| – | – | keine laufenden Tests oder Produkte | – |']),
+      '',
+      '## Nächster Testkandidat',
+      candidate ? `${candidate.id} ${candidate.title}: ${out.next_test_reason}` : 'keiner',
+      '',
+      '## Für dich',
+      ...(out.owner_actions?.length ? out.owner_actions.map((a) => `- ${a}`) : ['- nichts zu tun']),
+    ].join('\n');
+    this.memory.saveArtifact(this.store, {
+      area: 'decisions',
+      kind: 'portfolio_review',
+      title: ctx.job.title,
+      content: md,
+      summary: String(out.summary_markdown ?? '').replace(/[#*_`>|]/g, '').trim().slice(0, 400),
+      job_id: ctx.job.id,
+      agent_id: ctx.agent.id,
+    });
+  }
+
+  /** Hinweise zu Tests, Leitplanken und Fixkosten für die Übersicht. */
+  businessAlerts(now = new Date()): { level: 'info' | 'warn' | 'error'; text: string; link?: string }[] {
+    const out: { level: 'info' | 'warn' | 'error'; text: string; link?: string }[] = [];
+    const g = this.guardrails(now);
+    if (g.parallel.used > g.parallel.max) {
+      out.push({ level: 'warn', text: `Leitplanke überschritten: ${g.parallel.used} Tests/Projekte gleichzeitig (höchstens ${g.parallel.max})`, link: '#/portfolio' });
+    }
+    if (g.owner_hours_week.max > 0 && g.owner_hours_week.used >= g.owner_hours_week.max) {
+      out.push({ level: 'warn', text: `Owner-Zeit diese Woche ausgeschöpft: ${g.owner_hours_week.used} von ${g.owner_hours_week.max} Std.`, link: '#/portfolio' });
+    } else if (g.owner_hours_week.max > 0 && g.owner_hours_week.used >= 0.8 * g.owner_hours_week.max) {
+      out.push({ level: 'info', text: `Owner-Zeit diese Woche: ${g.owner_hours_week.used} von ${g.owner_hours_week.max} Std.`, link: '#/portfolio' });
+    }
+    for (const o of this.store.opportunities.list({ status: ['TESTING'] })) {
+      const t = o.test;
+      if (t?.status === 'READY') out.push({ level: 'info', text: `${o.id}: Testpaket bereit – deine Schritte erledigen, dann „Test ist live“`, link: `#/opportunities/${o.id}` });
+      if (t?.status === 'RUNNING' && t.ends_at && t.ends_at <= now.toISOString()) {
+        out.push({ level: 'warn', text: `${o.id}: Nachfragetest ist abgelaufen – bitte Ergebnis erfassen`, link: `#/opportunities/${o.id}` });
+      }
+    }
+    for (const i of this.portfolioItems(now)) {
+      if (i.status === 'STOPPED' || i.fixed_costs_eur_month == null) continue;
+      if (i.fixed_costs_eur_month > g.fixed_costs_eur_month && i.last30.revenue_eur < i.fixed_costs_eur_month) {
+        out.push({
+          level: 'warn',
+          text: `${i.id}: Fixkosten ${eur(i.fixed_costs_eur_month)}/Monat über der Leitplanke (${eur(g.fixed_costs_eur_month)}) und nicht durch Erträge gedeckt`,
+          link: `#/opportunities/${i.id}`,
+        });
+      }
+    }
+    return out;
+  }
+
+  // ================================================================== Bilder
+
+  /** Gibt es einen aktiven Bild-Provider mit mindestens einem Modell? */
+  hasImageProvider(): boolean {
+    return this.store.providers.list().some((p) => p.enabled && providerKind(p.type) === 'image' && this.store.models.list(p.id).some((m) => m.enabled));
+  }
+
+  /** Bildanfragen eines Agents als Bild-Jobs einreihen (höchstens 4 je Ergebnis). */
+  requestImages(ctx: JobContext, requests: ImageRequest[] | undefined): string[] {
+    const list = (requests ?? []).filter((r) => r && String(r.prompt ?? '').trim()).slice(0, 4);
+    if (!list.length) return [];
+    if (!this.hasImageProvider()) {
+      return [
+        `${list.length} Bildanfrage(n) nicht ausgeführt – kein Bild-Provider aktiv (Provider & Modelle → ChatGPT-Abo oder OpenAI-Bild-API): ` +
+          list.map((r) => r.file_name || String(r.prompt).slice(0, 40)).join(', '),
+      ];
+    }
+    const notes: string[] = [];
+    for (const r of list) {
+      try {
+        const job = this.createJob({
+          type: 'image_generation',
+          opportunity_id: ctx.opportunity?.id ?? null,
+          parent_job_id: ctx.job.id,
+          created_by: `job:${ctx.job.id}`,
+          automatic: true,
+          input: { prompt: r.prompt, file_name: r.file_name, aspect: r.aspect, transparent: !!r.transparent, purpose: r.purpose },
+        });
+        if (job) notes.push(`Bild-Job #${job.id}: ${r.file_name || String(r.prompt).slice(0, 60)}`);
+      } catch (e) {
+        notes.push(`Bildanfrage ${r.file_name || ''}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return notes;
+  }
+
+  /** Speichert ein erzeugtes Bild im Gedächtnis (media/) und – mit Opportunity – im Workspace unter assets/. */
+  async saveGeneratedImage(ctx: JobContext, result: ImageCallResult): Promise<Record<string, unknown>> {
+    const base =
+      String(ctx.job.input.file_name ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/\.(png|jpe?g|webp)$/i, '')
+        .replace(/[^a-z0-9äöüß_-]+/gi, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60) || 'bild';
+    const name = `${base}-${ctx.job.id}.png`;
+    const oppId = ctx.opportunity?.id ?? null;
+    const rel = `media/${oppId ?? 'allgemein'}/${name}`;
+    this.memory.writeBinary(rel, result.image);
+    let workspaceFile: string | null = null;
+    if (oppId) {
+      const ws = this.memory.workspaceDir(oppId);
+      workspaceFile = `assets/${name}`;
+      fs.mkdirSync(path.join(ws, 'assets'), { recursive: true });
+      fs.writeFileSync(path.join(ws, workspaceFile), result.image);
+      await commitWorkspace(ws, `${oppId}: Bild ${name}`);
+    }
+    const prompt = String(ctx.job.input.prompt ?? '');
+    this.store.artifacts.create({
+      kind: 'image',
+      title: `Bild: ${base}`,
+      path: rel,
+      format: 'png',
+      size: result.image.length,
+      summary: `${prompt}${result.revisedPrompt ? ` (überarbeitet: ${result.revisedPrompt})` : ''}`.slice(0, 500),
+      job_id: ctx.job.id,
+      agent_id: ctx.agent.id,
+      opportunity_id: oppId,
+      task_id: null,
+    });
+    this.audit(`agent:${ctx.agent.id}`, 'image.created', 'job', ctx.job.id, 1, { file: rel, workspace_file: workspaceFile, bytes: result.image.length, model: result.model });
+    this.changed('memory');
+    if (oppId) this.changed('opportunity', oppId);
+    return { file: rel, workspace_file: workspaceFile, bytes: result.image.length, model: result.model, revised_prompt: result.revisedPrompt };
   }
 
   // ================================================================== Provider

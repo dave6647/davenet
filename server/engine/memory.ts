@@ -5,7 +5,7 @@ import type { Store } from '../repo/store.ts';
 import { ValidationError } from '../repo/util.ts';
 
 /** Bereiche des Unternehmensgedächtnisses (Konzept §13). */
-export const MEMORY_AREAS = ['strategy', 'opportunities', 'projects', 'research', 'finance', 'decisions', 'knowledge', 'audit'] as const;
+export const MEMORY_AREAS = ['strategy', 'opportunities', 'projects', 'research', 'finance', 'decisions', 'knowledge', 'media', 'audit'] as const;
 export type MemoryArea = (typeof MEMORY_AREAS)[number];
 
 /** Bereiche, die der Owner in der Oberfläche direkt bearbeiten darf. */
@@ -87,6 +87,12 @@ export class CompanyMemory {
     const file = this.resolve(rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, content, 'utf8');
+  }
+
+  writeBinary(rel: string, content: Buffer): void {
+    const file = this.resolve(rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
   }
 
   ownerWrite(rel: string, content: string): void {
@@ -234,6 +240,7 @@ export class CompanyMemory {
   }
 
   readArtifact(a: Artifact): string {
+    if (a.format === 'png') return ''; // Bilder werden über /api/memory/raw ausgeliefert
     try {
       return this.readFile(a.path);
     } catch {

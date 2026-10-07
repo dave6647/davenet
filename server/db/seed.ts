@@ -1,5 +1,6 @@
 import type { Store } from '../repo/store.ts';
 import type { Agent, Capability, Model, Provider } from '../../shared/domain.ts';
+import { computeNextRun } from '../engine/triggers.ts';
 
 /**
  * Startkonfiguration nach Konzept §2 (Organisationsmodell) – zunächst ausschließlich mit Claude-Modellen.
@@ -281,7 +282,150 @@ export const DEFAULT_ROUTES: { job_type: string; agent_id: string; capability_ov
   { job_type: 'review', agent_id: 'REVIEW' },
   { job_type: 'cost_report', agent_id: 'COST_CONTROLLER' },
   { job_type: 'audit_review', agent_id: 'AUDITOR' },
+  { job_type: 'test_preparation', agent_id: 'IMPLEMENTATION' },
+  { job_type: 'test_evaluation', agent_id: 'RESEARCH_ANALYST' },
+  { job_type: 'portfolio_review', agent_id: 'EXECUTIVE_ORCHESTRATOR' },
+  { job_type: 'image_generation', agent_id: 'DESIGNER' },
 ];
+
+// ---------------------------------------------------------------- Erweiterung 2: Design, Bild-Provider, Portfolio-Review
+
+const DESIGN_DEPARTMENT = { id: 'design', name: 'Design', description: 'Erstellt Bilder und Designs für Tests und Produkte.', sort_order: 4 };
+
+const DESIGNER: SeedAgent = {
+  id: 'DESIGNER',
+  name: 'Designer',
+  department_id: 'design',
+  capability: 'MEDIUM',
+  tools: [],
+  max_input_tokens: 8000,
+  max_output_tokens: 2000,
+  max_tool_calls: 0,
+  max_runtime_sec: 600,
+  max_job_cost_usd: 0.5,
+  monthly_budget_usd: 5,
+  description: 'Erzeugt Bilder über einen Bild-Provider (ChatGPT-Abo per Codex CLI oder OpenAI-Bild-API) für Tests und Produkte.',
+  instructions:
+    'Du erzeugst Bilder für Tests und Produkte von Davenet: Motive, Illustrationen, Hintergründe und Produktbilder. ' +
+    'Logos, Icons und Schrift-Designs entstehen besser als SVG in der Umsetzung. Keine fremden Marken, Figuren oder geschützten Stile.',
+  sort_order: 8,
+};
+
+const IMAGE_PROVIDERS: SeedProvider[] = [
+  {
+    id: 'chatgpt_abo',
+    name: 'ChatGPT-Abo (Codex CLI)',
+    type: 'codex_cli',
+    enabled: false,
+    priority: 30,
+    billing_mode: 'subscription',
+    config: { cli_path: 'codex', codex_home: '', agent_model: '' },
+    quota_unit: 'none',
+    quota_limit: null,
+    quota_period: 'daily',
+    policy_on_exhaustion: 'WAIT',
+    max_concurrent: 1,
+    notes:
+      'Bilder über dein ChatGPT-Abo: einmalig "npm install -g @openai/codex" und "codex login" (Sign in with ChatGPT), dann ' +
+      '"Verbindung testen" und aktivieren. Keine API-Kosten; erreichte Limits erkennt Davenet an der Meldung von Codex.',
+  },
+  {
+    id: 'openai_images',
+    name: 'OpenAI Bild-API (Pay-as-you-go)',
+    type: 'openai_images',
+    enabled: false,
+    priority: 40,
+    billing_mode: 'pay_as_you_go',
+    config: { api_key_env: 'OPENAI_API_KEY', base_url: '' },
+    quota_unit: 'none',
+    quota_period: 'monthly',
+    policy_on_exhaustion: 'BLOCK',
+    monthly_cost_limit_usd: 5,
+    max_concurrent: 2,
+    notes: 'Bilder per OpenAI-API-Key (platform.openai.com), Abrechnung pro Bild. Standardmäßig aus und mit Kostenlimit $5/Monat.',
+  },
+  {
+    id: 'image_simulation',
+    name: 'Bild-Simulation (ohne KI)',
+    type: 'mock_image',
+    enabled: false,
+    priority: 90,
+    billing_mode: 'subscription',
+    config: { latency_ms: 200 },
+    quota_unit: 'requests',
+    quota_limit: 100,
+    quota_period: 'daily',
+    policy_on_exhaustion: 'WAIT',
+    max_concurrent: 2,
+    notes: 'Erzeugt Platzhalter-Bilder ohne KI – zum Ausprobieren der Bild-Abläufe.',
+  },
+];
+
+const IMAGE_MODELS: SeedModel[] = [
+  { provider_id: 'chatgpt_abo', model_name: 'gpt-image-2', label: 'GPT Image 2 (über ChatGPT-Abo)', tier: 'MEDIUM', context_window: 32000, max_output_tokens: 8000, sort_order: 0 },
+  {
+    provider_id: 'openai_images',
+    model_name: 'gpt-image-1-mini',
+    label: 'GPT Image 1 mini',
+    tier: 'LOW',
+    context_window: 32000,
+    max_output_tokens: 8000,
+    input_price_per_mtok: 2,
+    output_price_per_mtok: 8,
+    sort_order: 0,
+  },
+  {
+    provider_id: 'openai_images',
+    model_name: 'gpt-image-2',
+    label: 'GPT Image 2',
+    tier: 'MEDIUM',
+    context_window: 32000,
+    max_output_tokens: 8000,
+    input_price_per_mtok: 5,
+    output_price_per_mtok: 30,
+    sort_order: 1,
+  },
+  { provider_id: 'image_simulation', model_name: 'sim-image', label: 'Simulation Bild', tier: 'MEDIUM', context_window: 32000, max_output_tokens: 8000, sort_order: 0 },
+];
+
+const PORTFOLIO_SCHEDULE = { name: 'Portfolio-Review (monatlich)', job_type: 'portfolio_review', kind: 'monthly' as const, day_of_month: 1, time_of_day: '08:30' };
+
+/**
+ * Ergänzt Bausteine, die nach der ersten Version hinzukamen (Design-Abteilung, Designer, Bild-Provider,
+ * monatlicher Portfolio-Review) – genau einmal, auch bei bestehenden Installationen. Vom Owner gelöschte
+ * Einträge werden danach nicht wieder angelegt.
+ */
+export function ensureSeedV2(store: Store): void {
+  if (store.db.get("SELECT value FROM meta WHERE key = 'seed_v2'")) return;
+  store.tx(() => {
+    if (!store.departments.get(DESIGN_DEPARTMENT.id)) store.departments.create(DESIGN_DEPARTMENT);
+    if (!store.agents.get(DESIGNER.id)) store.agents.create({ ...DESIGNER, department_id: store.departments.get('design') ? 'design' : null });
+    for (const p of IMAGE_PROVIDERS) if (!store.providers.get(p.id)) store.providers.create(p);
+    for (const m of IMAGE_MODELS) {
+      if (store.providers.get(m.provider_id) && !store.models.list(m.provider_id).some((x) => x.model_name === m.model_name)) store.models.create(m);
+    }
+    if (!store.schedules.list().some((s) => s.job_type === 'portfolio_review')) {
+      const s = { ...PORTFOLIO_SCHEDULE, interval_minutes: null, weekday: null };
+      store.schedules.create({
+        name: s.name,
+        job_type: s.job_type,
+        agent_id: null,
+        input: {},
+        priority: 1,
+        kind: s.kind,
+        interval_minutes: null,
+        time_of_day: s.time_of_day,
+        weekday: null,
+        day_of_month: s.day_of_month,
+        // vom Owner ausdrücklich gewünscht (Strategie §8) – daher als einziger Zeit-Trigger von Anfang an aktiv
+        enabled: true,
+        next_run_at: computeNextRun(s, new Date())?.toISOString() ?? null,
+      });
+    }
+    store.db.run("INSERT INTO meta (key, value) VALUES ('seed_v2', ?)", new Date().toISOString());
+    store.audit.add({ actor: 'system', action: 'system.seeded_v2', details: { agents: ['DESIGNER'], providers: IMAGE_PROVIDERS.map((p) => p.id) } });
+  });
+}
 
 const SCHEDULES = [
   { name: 'Research-Zyklus (wöchentlich)', job_type: 'opportunity_scan', input: { count: 5 }, kind: 'weekly', weekday: 1, time_of_day: '08:00' },
@@ -293,6 +437,7 @@ const SCHEDULES = [
 export function seedDefaults(store: Store): boolean {
   const seeded = store.db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'seeded'");
   if (seeded) {
+    ensureSeedV2(store);
     ensureRoutes(store);
     return false;
   }
@@ -317,6 +462,7 @@ export function seedDefaults(store: Store): boolean {
         next_run_at: null,
       });
     }
+    ensureSeedV2(store);
     ensureRoutes(store);
     store.db.run("INSERT INTO meta (key, value) VALUES ('seeded', ?)", new Date().toISOString());
     store.audit.add({ actor: 'system', action: 'system.seeded', details: { departments: DEPARTMENTS.length, agents: AGENTS.length } });

@@ -1,5 +1,6 @@
 import type { z } from 'zod';
-import type { Agent, Job, JobTypeInfo, Opportunity, Settings, Task, ToolKey } from '../../../shared/domain.ts';
+import type { Agent, Job, JobTypeInfo, Opportunity, ProviderKind, Settings, Task, ToolKey } from '../../../shared/domain.ts';
+import type { ImageCallRequest, ImageCallResult } from '../../providers/types.ts';
 import type { Orchestrator } from '../orchestrator.ts';
 import type { ContextSection } from '../prompt.ts';
 
@@ -18,6 +19,13 @@ export interface CompletionInfo {
   filesChanged: string[];
 }
 
+/** Bild-Job: wird ohne Sprachmodell direkt von einem Bild-Provider ausgeführt. */
+export interface ImageJobHooks {
+  request(ctx: JobContext): Pick<ImageCallRequest, 'prompt' | 'size' | 'quality' | 'transparent'>;
+  /** Speichert das Bild und liefert die Job-Ausgabe. */
+  complete(ctx: JobContext, result: ImageCallResult, info: { providerId: string }): Record<string, unknown> | Promise<Record<string, unknown>>;
+}
+
 /** Definition eines Job-Typs: Zweck, erlaubte Werkzeuge, Prompt-Aufbau, Ergebnis-Schema und Folgeaktionen. */
 export interface JobTypeDef<O = any> {
   key: string;
@@ -30,6 +38,10 @@ export interface JobTypeDef<O = any> {
   requiresTask?: boolean;
   /** Darf der Owner diesen Job manuell anlegen? */
   manual: boolean;
+  /** Art des Providers, der den Job ausführt (Standard: Sprachmodell). */
+  providerKind?: ProviderKind;
+  /** Nur bei providerKind 'image'. */
+  image?: ImageJobHooks;
   inputFields: JobTypeInfo['input_fields'];
   /** Projekt-Workspace bereitstellen (nur mit Opportunity). */
   workspace?: 'read' | 'write';
@@ -53,6 +65,7 @@ export function toInfo(def: JobTypeDef): JobTypeInfo {
     requires_opportunity: !!def.requiresOpportunity,
     requires_task: !!def.requiresTask,
     manual: def.manual,
+    provider_kind: def.providerKind ?? 'llm',
     input_fields: def.inputFields,
   };
 }

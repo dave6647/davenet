@@ -1,4 +1,4 @@
-import type { Provider } from '../../shared/domain.ts';
+import { CRITERION_KEYS, type Provider } from '../../shared/domain.ts';
 import { Workspace } from '../engine/workspace.ts';
 import {
   emptyUsage,
@@ -61,6 +61,9 @@ function sample(schema: JsonSchema | undefined, ctx: SampleContext, key = '', de
     }
     case 'integer':
     case 'number': {
+      if ((CRITERION_KEYS as string[]).includes(key)) return 7;
+      if (/^duration_days$/.test(key)) return 14;
+      if (/^minutes$/.test(key)) return 30;
       if (/confidence/i.test(key)) return 0.7;
       if (/risk/i.test(key)) return 3;
       if (/_score$|^score$/i.test(key) && !/screening/i.test(key)) return 7;
@@ -130,6 +133,7 @@ export class MockAdapter implements ProviderAdapter {
 export const mockType: ProviderTypeDef = {
   info: {
     type: 'mock',
+    kind: 'llm',
     label: 'Simulation (ohne KI)',
     description: 'Erzeugt Platzhalter-Ergebnisse ohne echte Modellaufrufe – zum Testen der Abläufe ohne Kosten.',
     billing_mode_default: 'subscription',

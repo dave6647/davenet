@@ -31,6 +31,7 @@ export function Dashboard() {
   const j = data.jobs;
   const inPipeline = ['DISCOVERED', 'SCREENING', 'RESEARCH', 'EVALUATION', 'PROPOSED'].reduce((s, k) => s + (data.opportunities[k] ?? 0), 0);
   const inDev = ['APPROVED', 'DEVELOPMENT', 'REVIEW', 'READY'].reduce((s, k) => s + (data.opportunities[k] ?? 0), 0);
+  const inTest = data.opportunities.TESTING ?? 0;
 
   return (
     <>
@@ -55,7 +56,7 @@ export function Dashboard() {
         <div className="card stat" onClick={() => navigate('/approvals')} style={{ cursor: 'pointer' }}>
           <span className="label">Offene Freigaben</span>
           <span className="value">{data.approvals_pending}</span>
-          <span className="hint">Projektstart, Release, Provider-Wechsel</span>
+          <span className="hint">Nachfragetest, Projektstart, Beenden, Release</span>
         </div>
         <div className="card stat" onClick={() => navigate('/jobs')} style={{ cursor: 'pointer' }}>
           <span className="label">Jobs aktiv</span>
@@ -73,7 +74,7 @@ export function Dashboard() {
           <span className="label">Opportunities in Prüfung</span>
           <span className="value">{inPipeline}</span>
           <span className="hint">
-            {inDev} in Umsetzung · {data.opportunities.DEPLOYED ?? 0} veröffentlicht · {data.opportunities.REJECTED ?? 0} verworfen
+            {inTest} im Test · {inDev} in Umsetzung · {data.opportunities.DEPLOYED ?? 0} veröffentlicht · {data.opportunities.REJECTED ?? 0} verworfen
           </span>
         </div>
         <div className="card stat" onClick={() => navigate('/finance')} style={{ cursor: 'pointer' }}>

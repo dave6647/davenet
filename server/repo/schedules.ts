@@ -1,6 +1,6 @@
 import type { Db } from '../db/database.ts';
 import { nowIso } from '../db/database.ts';
-import type { Schedule, Settings } from '../../shared/domain.ts';
+import { DEFAULT_CRITERIA_WEIGHTS, type Schedule, type Settings } from '../../shared/domain.ts';
 import { buildUpdate, NotFoundError, numOrNull, parseJson, toBool } from './util.ts';
 
 // ---------------------------------------------------------------- Zeit-Trigger (Konzept §15)
@@ -119,7 +119,17 @@ export const DEFAULT_SETTINGS: Settings = {
   artifact_context_chars: 6000,
   strategy_context_chars: 8000,
   job_max_attempts: 3,
+  require_demand_test: true,
+  guard_test_budget_eur: 5,
+  guard_test_owner_hours: 3,
+  guard_fixed_costs_eur_month: 5,
+  guard_max_parallel: 2,
+  guard_owner_hours_week: 10,
+  ko_min_demand: 3,
+  criteria_weights: { ...DEFAULT_CRITERIA_WEIGHTS },
 };
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
 export class SettingsRepo {
   private cache: Settings | null = null;
@@ -130,7 +140,11 @@ export class SettingsRepo {
     if (this.cache) return this.cache;
     const out: Record<string, unknown> = { ...DEFAULT_SETTINGS };
     for (const r of this.db.all<{ key: string; value: string }>('SELECT key, value FROM settings')) {
-      if (r.key in DEFAULT_SETTINGS) out[r.key] = parseJson(r.value, (DEFAULT_SETTINGS as unknown as Record<string, unknown>)[r.key]);
+      if (!(r.key in DEFAULT_SETTINGS)) continue;
+      const def = (DEFAULT_SETTINGS as unknown as Record<string, unknown>)[r.key];
+      const value = parseJson(r.value, def);
+      // Objekte (z. B. Kriterien-Gewichte) mit den Standardwerten zusammenführen, damit neue Schlüssel nicht fehlen
+      out[r.key] = isPlainObject(def) && isPlainObject(value) ? { ...def, ...value } : value;
     }
     this.cache = out as unknown as Settings;
     return this.cache;

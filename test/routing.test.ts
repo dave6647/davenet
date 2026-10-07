@@ -12,6 +12,7 @@ const scriptedCalls: string[] = [];
 registerProviderType({
   info: {
     type: 'scripted_quota',
+    kind: 'llm',
     label: 'Test: Limit',
     description: '',
     billing_mode_default: 'subscription',

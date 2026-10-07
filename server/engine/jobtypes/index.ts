@@ -1,6 +1,8 @@
 import type { JobTypeInfo } from '../../../shared/domain.ts';
 import { implementation, review, technicalPlanning } from './development.ts';
-import { customJob, executiveBriefing, ownerDirective } from './executive.ts';
+import { customJob, executiveBriefing, ownerDirective, portfolioReview } from './executive.ts';
+import { imageGeneration } from './design.ts';
+import { testEvaluation, testPreparation } from './testing.ts';
 import { auditReview, costReport } from './finance.ts';
 import { deepResearch, evaluation, opportunityScan, screening } from './research.ts';
 import { toInfo, type JobTypeDef } from './types.ts';
@@ -13,11 +15,15 @@ export const JOB_TYPES: JobTypeDef[] = [
   screening,
   deepResearch,
   evaluation,
+  testPreparation,
+  testEvaluation,
   technicalPlanning,
   implementation,
   review,
+  portfolioReview,
   costReport,
   auditReview,
+  imageGeneration,
   customJob,
 ];
 

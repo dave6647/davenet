@@ -123,6 +123,19 @@ export function JobPage({ id }: { id: number }) {
             </dl>
           </Card>
 
+          {j.type === 'image_generation' && j.status === 'COMPLETED' && typeof (j.output as { file?: unknown })?.file === 'string' && (
+            <Card title="Bild">
+              <img
+                src={`/api/memory/raw?path=${encodeURIComponent((j.output as { file: string }).file)}`}
+                alt={j.title}
+                style={{ maxWidth: '100%', maxHeight: 520, borderRadius: 6 }}
+              />
+              <div className="small muted mono">company/{(j.output as { file: string }).file}</div>
+              {(j.output as { workspace_file?: string | null }).workspace_file && (
+                <div className="small muted">Im Projekt-Workspace: {(j.output as { workspace_file: string }).workspace_file}</div>
+              )}
+            </Card>
+          )}
           {j.output != null && (
             <Card title="Ergebnis (strukturiert)" actions={<button className="small" onClick={() => setShowOutput(!showOutput)}>{showOutput ? 'einklappen' : 'anzeigen'}</button>}>
               {showOutput ? <pre>{JSON.stringify(j.output, null, 2)}</pre> : <span className="muted small">Die verdichteten Ergebnisse liegen als Artefakte im Unternehmensgedächtnis (rechts).</span>}

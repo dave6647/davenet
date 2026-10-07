@@ -296,6 +296,7 @@ export class AnthropicApiAdapter implements ProviderAdapter {
 export const anthropicApiType: ProviderTypeDef = {
   info: {
     type: 'anthropic_api',
+    kind: 'llm',
     label: 'Anthropic API (API-Key)',
     description: 'Direkter Zugang zur Claude API mit API-Key. Abrechnung pro Token – Kostenlimit pro Monat empfohlen.',
     billing_mode_default: 'pay_as_you_go',
